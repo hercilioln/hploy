@@ -15,10 +15,13 @@ type Container struct {
 	ID        string
 	Name      string
 	Image     string
+	ImageID   string // the resolved image, which a rebuilt tag changes
 	State     string // running, exited, created, paused...
 	Status    string // "Up 2 hours (healthy)" -- Docker's own wording
 	Health    string // healthy, unhealthy, starting, "" when there is no healthcheck
 	App       string // hploy.app label, empty for containers that are not ours
+	Service   string // hploy.service label
+	SpecHash  string // hploy.spec-hash label
 	CreatedAt time.Time
 	Ports     []string
 }
@@ -63,6 +66,9 @@ type LogOptions struct {
 type Engine interface {
 	Ping(ctx context.Context) (string, error)
 	List(ctx context.Context, all bool) ([]Container, error)
+	ListNetworks(ctx context.Context) ([]Network, error)
+	ListVolumes(ctx context.Context) ([]Volume, error)
+	ImageID(ctx context.Context, ref string) (string, error)
 	Stats(ctx context.Context, ids []string) (<-chan Sample, <-chan error)
 	Logs(ctx context.Context, id string, opt LogOptions) (io.ReadCloser, error)
 }

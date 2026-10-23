@@ -28,6 +28,13 @@ func Parse(b []byte) (*Spec, error) {
 		}
 		sv.name = name
 	}
+	// A built service needs a tag to be referred to by; the rest of the
+	// program then treats built and pulled images the same way.
+	for _, sv := range s.all() {
+		if sv.Image == "" && sv.Build != nil {
+			sv.Image = fmt.Sprintf("%s-%s:latest", s.App, sv.Name())
+		}
+	}
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}

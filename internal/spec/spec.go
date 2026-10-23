@@ -1,5 +1,9 @@
 // Package spec reads and validates hploy.yaml: the desired state of an app,
 // with no knowledge of Docker.
+//
+// The spec describes the application and nothing about where it runs. Domain,
+// secrets and clone path are deployment config and live in the store, so this
+// file can be committed to the app's repository.
 package spec
 
 import (
@@ -12,9 +16,14 @@ import (
 
 // Spec is a whole hploy.yaml.
 type Spec struct {
-	Version  int                 `yaml:"version"`
-	App      string              `yaml:"app"`
-	Domains  []string            `yaml:"domains"`
+	Version int    `yaml:"version"`
+	App     string `yaml:"app"`
+
+	// EnvFile is the application's env file, relative to the spec. It is the
+	// single source of truth for secrets: the app reads it directly and hploy
+	// only interpolates ${NAME} from it.
+	EnvFile string `yaml:"env_file"`
+
 	Web      *Service            `yaml:"web"`
 	Services map[string]*Service `yaml:"services"`
 	Volumes  map[string]Volume   `yaml:"volumes"`
@@ -25,7 +34,10 @@ type Spec struct {
 
 // Service is one container.
 type Service struct {
+	// Image is the tag to run. With a build block it is the tag produced,
+	// defaulting to "<app>-<service>:latest".
 	Image     string    `yaml:"image"`
+	Build     *Build    `yaml:"build"`
 	Command   []string  `yaml:"command"`
 	Port      int       `yaml:"port"`
 	Health    *Health   `yaml:"health"`
@@ -39,17 +51,27 @@ type Service struct {
 
 func (s *Service) Name() string { return s.name }
 
+// Build makes the image from a Dockerfile instead of pulling it. This is what
+// lets hploy deploy any application that ships one.
+type Build struct {
+	// Context is the directory sent to the daemon, relative to the spec.
+	Context    string            `yaml:"context"`
+	Dockerfile string            `yaml:"dockerfile"`
+	Target     string            `yaml:"target"` // multi-stage stage
+	Args       map[string]string `yaml:"args"`
+}
+
+// ContextOrDefault is the build context, defaulting to the spec's directory.
+func (b *Build) ContextOrDefault() string {
+	if b.Context == "" {
+		return "."
+	}
+	return b.Context
+}
+
 // Volume is declared so plan knows which volumes to create.
 type Volume struct {
 	// reserved for driver/opts
-}
-
-// Env declares which variables a service needs, never their values; those
-// live outside the repository.
-type Env struct {
-	Required []string          `yaml:"required"`
-	Optional []string          `yaml:"optional"`
-	Literal  map[string]string `yaml:"literal"` // non-secret values only
 }
 
 // Resources caps the container. A missing memory limit is a validation error,
@@ -100,7 +122,16 @@ func (s *Spec) Validate() error {
 			fail("%s: invalid name", prefix)
 		}
 		if sv.Image == "" {
-			fail("%s: image is required", prefix)
+			fail("%s: set image, or build to make one", prefix)
+		}
+		if sv.Build != nil {
+			ctxDir := sv.Build.ContextOrDefault()
+			if strings.HasPrefix(ctxDir, "/") || strings.Contains(ctxDir, "..") {
+				fail("%s: build.context must be a relative path inside the app directory", prefix)
+			}
+			if df := sv.Build.Dockerfile; strings.HasPrefix(df, "/") || strings.Contains(df, "..") {
+				fail("%s: build.dockerfile must be inside the build context", prefix)
+			}
 		}
 		if sv.Resources.Memory == 0 {
 			fail("%s: resources.memory is required", prefix)
@@ -122,15 +153,12 @@ func (s *Spec) Validate() error {
 		}
 	}
 
-	if s.Web != nil {
-		if s.Web.Port == 0 {
-			fail("web: port is required — it is how the proxy finds the app")
-		}
-		if len(s.Domains) == 0 {
-			fail("domains is required when there is a web service")
-		}
-	} else if len(s.Domains) > 0 {
-		fail("domains is declared but there is no web service to serve them")
+	if strings.HasPrefix(s.EnvFile, "/") || strings.Contains(s.EnvFile, "..") {
+		fail("env_file must be a relative path inside the app directory")
+	}
+
+	if s.Web != nil && s.Web.Port == 0 {
+		fail("web: port is required — it is how the proxy finds the app")
 	}
 
 	for name, sv := range s.Services {
@@ -178,13 +206,10 @@ func (s *Spec) StartOrder() []*Service {
 	return out
 }
 
-// EnvNames lists every variable the service expects.
-func (sv *Service) EnvNames() []string {
-	out := append([]string{}, sv.Env.Required...)
-	out = append(out, sv.Env.Optional...)
-	for k := range sv.Env.Literal {
-		out = append(out, k)
+// EnvFileOrDefault is the app env file, defaulting to .env next to the spec.
+func (s *Spec) EnvFileOrDefault() string {
+	if s.EnvFile != "" {
+		return s.EnvFile
 	}
-	sort.Strings(out)
-	return out
+	return ".env"
 }

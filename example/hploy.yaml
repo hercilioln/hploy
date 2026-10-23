@@ -1,19 +1,32 @@
 # Example app: an nginx and a throwaway postgres, both official images.
 #
-#   cd example && hploy plan
+#   cd example && cp .env.example .env && hploy plan
 version: 1
 app: example
 
-domains:
-  - example.localhost
+# No domain here: that is deployment config, set by `hploy add` and kept in
+# ~/.hploy, so this file can be committed to the app's repository.
+#
+# Defaults to .env next to this file. Values live there, never here.
+env_file: .env
 
 # The service that receives traffic. Only this one has a port.
+#
+# An app that ships a Dockerfile replaces `image` with a build block; the tag
+# then defaults to "<app>-<service>:latest":
+#
+#   build:
+#     context: .
+#     dockerfile: Dockerfile    # optional
+#     target: prod              # optional, for a multi-stage build
+#     args:
+#       RELEASE: ${RELEASE}     # resolved from the env file, like env vars
 web:
   image: nginx:1.29-alpine
   port: 80
   health: /                      # shorthand, same as { path: / }
   env:
-    literal:
+    vars:
       NGINX_ENTRYPOINT_QUIET_LOGS: "1"
   resources:
     memory: 64m
@@ -24,10 +37,10 @@ services:
   db:
     image: postgres:17-alpine
     env:
-      required: [POSTGRES_PASSWORD]
-      literal:
-        POSTGRES_DB: example
-        POSTGRES_USER: example
+      vars:
+        POSTGRES_DB: ${DB_DATABASE}
+        POSTGRES_USER: ${DB_USERNAME}
+        POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - data:/var/lib/postgresql/data
     health:

@@ -28,6 +28,7 @@ type apiContainer struct {
 	ID      string            `json:"Id"`
 	Names   []string          `json:"Names"`
 	Image   string            `json:"Image"`
+	ImageID string            `json:"ImageID"`
 	State   string            `json:"State"`
 	Status  string            `json:"Status"`
 	Created int64             `json:"Created"`
@@ -62,10 +63,13 @@ func (c *Client) List(ctx context.Context, all bool) ([]Container, error) {
 			ID:        shortID(r.ID),
 			Name:      firstName(r.Names),
 			Image:     r.Image,
+			ImageID:   r.ImageID,
 			State:     r.State,
 			Status:    r.Status,
 			Health:    health(r.Status),
 			App:       r.Labels[LabelApp],
+			Service:   r.Labels[LabelService],
+			SpecHash:  r.Labels[LabelSpecHash],
 			CreatedAt: time.Unix(r.Created, 0),
 			Ports:     ports(r),
 		})

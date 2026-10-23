@@ -1,19 +1,25 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
 // DefaultSocket is where the daemon listens on a stock Linux install.
 const DefaultSocket = "/var/run/docker.sock"
+
+// ErrNotFound wraps a 404, so a caller can tell "absent" from "broken".
+var ErrNotFound = errors.New("not found")
 
 // Client talks to the Docker API over HTTP on a Unix socket.
 //
@@ -52,9 +58,25 @@ func (c *Client) Socket() string { return c.socket }
 // do runs a GET. Paths carry no API version prefix, so the daemon uses the
 // newest it supports.
 func (c *Client) do(ctx context.Context, path string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+path, nil)
+	return c.send(ctx, http.MethodGet, path, nil)
+}
+
+// send is do with a method and an optional JSON body.
+func (c *Client) send(ctx context.Context, method, path string, body any) (*http.Response, error) {
+	var reader io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		reader = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, "http://docker"+path, reader)
 	if err != nil {
 		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
@@ -67,7 +89,36 @@ func (c *Client) do(ctx context.Context, path string) (*http.Response, error) {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		var e struct{ Message string }
-		if json.Unmarshal(body, &e) == nil && e.Message != "" {
+		json.Unmarshal(body, &e)
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("%s: %w", strings.TrimSpace(e.Message), ErrNotFound)
+		}
+		if e.Message != "" {
+			return nil, fmt.Errorf("docker returned %d: %s", resp.StatusCode, e.Message)
+		}
+		return nil, fmt.Errorf("docker returned %d", resp.StatusCode)
+	}
+	return resp, nil
+}
+
+// sendStream posts a body the caller produces, such as a tar of a build
+// context, with no size known in advance.
+func (c *Client) sendStream(ctx context.Context, path string, body io.Reader, contentType string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://docker"+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("cannot reach socket %s: %w", c.socket, err)
+	}
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		var e struct{ Message string }
+		if json.Unmarshal(raw, &e) == nil && e.Message != "" {
 			return nil, fmt.Errorf("docker returned %d: %s", resp.StatusCode, e.Message)
 		}
 		return nil, fmt.Errorf("docker returned %d", resp.StatusCode)

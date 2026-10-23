@@ -34,15 +34,15 @@ func root() *cobra.Command {
 		Use:   "hploy",
 		Short: "Orchestrate containers and deploy apps on a VPS",
 		Long: "hploy — container orchestration from the terminal.\n\n" +
-			"This version is READ ONLY: it observes what already runs on the\n" +
-			"machine and never creates, changes or removes anything.",
+			"Only containers carrying this tool's label are ever created,\n" +
+			"altered or removed; anything else on the machine is read-only.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
 	cmd.PersistentFlags().StringVar(&socketFlag, "socket", engine.DefaultSocket,
 		"path to the Docker socket")
 
-	cmd.AddCommand(cmdPs(), cmdStats(), cmdLogs(), cmdVersion())
+	cmd.AddCommand(cmdPs(), cmdStats(), cmdLogs(), cmdApps(), cmdPlan(), cmdApply(), cmdBuild(), cmdStop(), cmdDown(), cmdVersion())
 	return cmd
 }
 
