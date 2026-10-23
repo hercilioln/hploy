@@ -1,0 +1,45 @@
+# App de exemplo, usado para testar o hploy sem tocar em nada de verdade.
+#
+# Sobe um nginx servindo uma pagina e um postgres de brinquedo. Os dois sao
+# imagens oficiais, entao nao ha build envolvido.
+#
+#   cd exemplo && hploy plan
+version: 1
+app: exemplo
+
+domains:
+  - exemplo.localhost
+
+# O servico que receberia trafego. E o unico com porta: e por ela que o proxy
+# encontra o app.
+web:
+  image: nginx:1.29-alpine
+  port: 80
+  health: /                      # atalho: equivale a { path: / }
+  env:
+    literal:
+      NGINX_ENTRYPOINT_QUIET_LOGS: "1"
+  resources:
+    memory: 64m
+    cpus: "0.25"
+
+# Servico de apoio: sem porta, so alcancavel pela rede interna do app.
+services:
+  db:
+    image: postgres:17-alpine
+    env:
+      required: [POSTGRES_PASSWORD]
+      literal:
+        POSTGRES_DB: exemplo
+        POSTGRES_USER: exemplo
+    volumes:
+      - dados:/var/lib/postgresql/data
+    health:
+      cmd: ["pg_isready", "-U", "exemplo"]
+      interval: 5s
+      retries: 10
+    resources:
+      memory: 128m
+
+volumes:
+  dados: {}
