@@ -17,10 +17,8 @@ const DefaultSocket = "/var/run/docker.sock"
 
 // Client talks to the Docker API over HTTP on a Unix socket.
 //
-// We deliberately avoid the official SDK: the API is plain REST, and writing
-// the client by hand keeps the binary small and makes it obvious what is being
-// requested. The price is that we declare the response structs ourselves --
-// only the fields we use, not the whole payload.
+// Hand-written rather than the official SDK to keep the dependency tree small;
+// the response structs carry only the fields we use.
 type Client struct {
 	hc     *http.Client
 	socket string
@@ -28,8 +26,7 @@ type Client struct {
 
 var _ Engine = (*Client)(nil)
 
-// New builds the client. It does not connect yet: the connection happens on
-// the first call, and Ping is there to verify it.
+// New builds the client; it connects on the first call.
 func New(socket string) *Client {
 	if socket == "" {
 		socket = DefaultSocket
@@ -44,18 +41,16 @@ func New(socket string) *Client {
 				},
 				DisableCompression: true,
 			},
-			// No global timeout on purpose: the stats stream and log follow
-			// stay open indefinitely. The context decides when they end.
+			// No global timeout: streams stay open until the context ends.
 		},
 	}
 }
 
-// Socket returns the path in use, for error messages.
+// Socket returns the path in use.
 func (c *Client) Socket() string { return c.socket }
 
-// do builds and runs the request. The path already carries its query string,
-// and no API version prefix -- without a version the daemon uses the newest it
-// supports, which avoids breaking when Docker is upgraded.
+// do runs a GET. Paths carry no API version prefix, so the daemon uses the
+// newest it supports.
 func (c *Client) do(ctx context.Context, path string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+path, nil)
 	if err != nil {
@@ -105,7 +100,7 @@ func (c *Client) Ping(ctx context.Context) (string, error) {
 	return fmt.Sprintf("%s (API %s)", v.Version, v.APIVersion), nil
 }
 
-// query builds a query string so url.Values does not show up everywhere.
+// query builds a query string.
 func query(pairs ...string) string {
 	if len(pairs)%2 != 0 {
 		panic("query: odd number of arguments")

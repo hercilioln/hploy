@@ -8,12 +8,10 @@ import (
 	"strconv"
 )
 
-// Logs returns the container's log stream, already demultiplexed.
+// Logs returns the container's log stream, demultiplexed.
 //
-// The gotcha: when the container has NO TTY, Docker delivers the stream in
-// frames with an 8-byte binary header (stream type + size), not plain text.
-// Dumping that straight to the screen prints garbage at the start of every
-// line. Containers with a TTY come through raw. Hence the Tty lookup first.
+// Without a TTY the stream is framed with a binary header; with one it is raw.
+// Hence the Tty lookup.
 func (c *Client) Logs(ctx context.Context, id string, opt LogOptions) (io.ReadCloser, error) {
 	tty, err := c.hasTTY(ctx, id)
 	if err != nil {
@@ -56,17 +54,13 @@ func (c *Client) hasTTY(ctx context.Context, id string) (bool, error) {
 	return insp.Config.Tty, nil
 }
 
-// demux strips the frame headers from the multiplexed stream.
+// demux strips the frame headers:
 //
-// Frame layout:
-//
-//	byte 0     stream type (0 stdin, 1 stdout, 2 stderr)
-//	bytes 1-3  zeros
+//	byte 0     stream type
 //	bytes 4-7  payload size, big-endian uint32
-//	rest       the payload
+//	rest       payload
 //
-// We do not split stdout from stderr: for reading logs, interleaved in the
-// order things happened is what you want.
+// stdout and stderr stay interleaved.
 type demux struct {
 	src       io.ReadCloser
 	remaining int // bytes left in the current frame
@@ -82,7 +76,7 @@ func (d *demux) Read(p []byte) (int, error) {
 		if size == 0 {
 			return 0, nil // empty frame: the next Read fetches the following one
 		}
-		// Guard against a corrupt header turning into an absurd allocation.
+		// A corrupt header must not become a huge allocation.
 		if size > 16<<20 {
 			return 0, fmt.Errorf("implausible log frame (%d bytes): stream out of sync", size)
 		}

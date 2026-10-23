@@ -1,29 +1,21 @@
-# Build output.
-#
-# The leading slash anchors the pattern to the repository ROOT. Without it,
-# "hploy" would match any file or directory with that name at any depth --
-# including cmd/hploy/, which is exactly what dropped main.go from the first
-# commit.
+# Build output. The leading slash anchors to the repo root; without it "hploy"
+# would also match cmd/hploy/.
 /bin/
 /dist/
 /hploy
 
-# Tests and coverage.
 *.test
 *.out
 coverage.*
 
-# hploy's local state. The real one lives in ~/.hploy, outside the repo, but a
-# test could produce this here.
+# Local state; the real one lives in ~/.hploy.
 .hploy/
 
-# Secrets never enter the repository: the spec declares variable NAMES, the
-# values live in ~/.hploy/apps/<app>/env.
+# Secrets stay out: the spec declares variable names, not values.
 .env
 *.env
 !*.env.example
 
-# Editors.
 .idea/
 .vscode/
 *.swp

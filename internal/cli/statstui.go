@@ -12,12 +12,8 @@ import (
 	"github.com/hercilioln/hploy/internal/ui"
 )
 
-// The TUI follows Bubble Tea's Elm architecture: Init fires effects, Update
-// takes messages and returns new state, View draws from state. No I/O in View.
-//
-// Architectural decision: sampling runs on the SERVER, drawing on the CLIENT.
-// That is why the model only holds finished numbers -- if hploy ever talks to
-// a remote daemon, only the origin of the message changes.
+// statsModel holds only finished numbers: sampling happens where the daemon
+// is, rendering happens here.
 type statsModel struct {
 	engine   *engine.Client
 	interval time.Duration

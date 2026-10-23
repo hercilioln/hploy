@@ -1,9 +1,5 @@
-// Package spec reads and validates hploy.yaml.
-//
-// The spec describes the DESIRED state of an app. It knows nothing about
-// Docker -- translating it into containers, networks and volumes is the plan
-// package's job. That separation is what lets us validate a spec with no
-// daemon anywhere in sight.
+// Package spec reads and validates hploy.yaml: the desired state of an app,
+// with no knowledge of Docker.
 package spec
 
 import (
@@ -23,8 +19,7 @@ type Spec struct {
 	Services map[string]*Service `yaml:"services"`
 	Volumes  map[string]Volume   `yaml:"volumes"`
 
-	// Source records which file the spec came from, so error messages can
-	// point at the right place.
+	// Source is the file the spec came from.
 	Source string `yaml:"-"`
 }
 
@@ -44,27 +39,21 @@ type Service struct {
 
 func (s *Service) Name() string { return s.name }
 
-// Volume has no options yet; it exists so the spec declares which volumes the
-// app uses and plan can create the missing ones.
+// Volume is declared so plan knows which volumes to create.
 type Volume struct {
-	// reserved for driver/opts later
+	// reserved for driver/opts
 }
 
-// Env declares WHICH variables the service needs -- never the values.
-//
-// A secret in a version-controlled file is a leak waiting to happen. Values
-// come from ~/.hploy/apps/<app>/env, which never reaches git.
+// Env declares which variables a service needs, never their values; those
+// live outside the repository.
 type Env struct {
 	Required []string          `yaml:"required"`
 	Optional []string          `yaml:"optional"`
 	Literal  map[string]string `yaml:"literal"` // non-secret values only
 }
 
-// Resources caps the container.
-//
-// On a 4 GB VPS running two apps, a memory limit is the difference between
-// "one app dies" and "the machine starts swapping and everything goes down
-// together". That is why a missing limit is an error, not a warning.
+// Resources caps the container. A missing memory limit is a validation error,
+// not a warning.
 type Resources struct {
 	Memory Bytes  `yaml:"memory"`
 	CPUs   string `yaml:"cpus"`
@@ -86,8 +75,7 @@ func Load(path string) (*Spec, error) {
 	return s, nil
 }
 
-// Validate collects EVERY problem before returning, instead of stopping at
-// the first one. Whoever is writing the file would rather see the whole list.
+// Validate reports every problem at once rather than stopping at the first.
 func (s *Spec) Validate() error {
 	var problems []string
 	fail := func(format string, args ...any) {
@@ -115,7 +103,7 @@ func (s *Spec) Validate() error {
 			fail("%s: image is required", prefix)
 		}
 		if sv.Resources.Memory == 0 {
-			fail("%s: resources.memory is not set — with no limit, one app alone can take the machine down", prefix)
+			fail("%s: resources.memory is required", prefix)
 		}
 		for _, v := range sv.Volumes {
 			name, path, ok := strings.Cut(v, ":")
@@ -145,8 +133,6 @@ func (s *Spec) Validate() error {
 		fail("domains is declared but there is no web service to serve them")
 	}
 
-	// A support service with a port is the mistake that exposes a database to
-	// the internet.
 	for name, sv := range s.Services {
 		if sv.Port != 0 {
 			fail("services.%s: port is not allowed on a support service — use the internal network", name)
@@ -177,10 +163,7 @@ func (s *Spec) all() []*Service {
 	return out
 }
 
-// StartOrder returns the services with web last.
-//
-// Order matters on apply: the database has to be up before web, otherwise the
-// application starts unable to connect.
+// StartOrder puts web last, so its dependencies come up first.
 func (s *Spec) StartOrder() []*Service {
 	all := s.all()
 	out := make([]*Service, 0, len(all))

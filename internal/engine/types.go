@@ -1,8 +1,7 @@
 // Package engine talks to the Docker daemon.
 //
-// The types here are OURS, not Docker's. The rest of the program depends on
-// these, not on whatever shape the API returns -- so swapping the source (or
-// the API version) does not ripple through the whole codebase.
+// The types here are ours, not Docker's, so the rest of the program does not
+// depend on the API's shape.
 package engine
 
 import (
@@ -39,8 +38,8 @@ type Sample struct {
 	BlkRead  uint64
 	BlkWrite uint64
 
-	// HasCPU is false on the first frame of the stream: without a previous
-	// reading there is no delta to compute. The view shows "—" in that case.
+	// False on the first frame of a stream: a CPU delta needs a previous
+	// reading.
 	HasCPU bool
 }
 
@@ -59,8 +58,8 @@ type LogOptions struct {
 	Timestamps bool
 }
 
-// Engine is the boundary with Docker. It is an interface so the rest of the
-// program (and the tests) does not need a real daemon.
+// Engine is the boundary with Docker, as an interface so callers can be
+// tested without a daemon.
 type Engine interface {
 	Ping(ctx context.Context) (string, error)
 	List(ctx context.Context, all bool) ([]Container, error)

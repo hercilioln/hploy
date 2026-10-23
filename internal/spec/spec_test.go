@@ -77,7 +77,7 @@ services:
   db:
     image: postgres:17-alpine
 `,
-			want: "resources.memory is not set",
+			want: "resources.memory is required",
 		},
 		{
 			name: "web without a domain",

@@ -67,8 +67,7 @@ func portList(ct engine.Container) string {
 		return ui.Dim.Render("—")
 	}
 	s := strings.Join(ct.Ports, " ")
-	// A port published on every interface deserves attention: that is the
-	// mistake that exposes a database to the internet.
+	// A port bound to every interface is worth flagging.
 	if strings.Contains(s, "*:") {
 		return ui.Warn.Render(truncate(s, 28))
 	}

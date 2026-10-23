@@ -13,9 +13,7 @@ import (
 func Parse(b []byte) (*Spec, error) {
 	var s Spec
 	dec := yaml.NewDecoder(strings.NewReader(string(b)))
-	// KnownFields turns an unknown key into an error instead of silently
-	// ignoring it. A typo in a field name is the nastiest config bug there is:
-	// everything "works", except the option was never applied.
+	// Unknown keys are errors, so a typo does not silently do nothing.
 	dec.KnownFields(true)
 	if err := dec.Decode(&s); err != nil {
 		return nil, err
@@ -89,11 +87,10 @@ func (b Bytes) String() string {
 	}
 }
 
-// Health accepts two shapes, because a web service and a support service need
-// different probes:
+// Health accepts two shapes:
 //
-//	health: /up                                -> HTTP GET on that path
-//	health: { cmd: ["pg_isready", "-U", "x"] } -> command inside the container
+//	health: /up                                -> HTTP GET
+//	health: { cmd: ["pg_isready", "-U", "x"] } -> command in the container
 type Health struct {
 	Path     string        `yaml:"path"`
 	Cmd      []string      `yaml:"cmd"`
@@ -117,7 +114,7 @@ func (h *Health) UnmarshalYAML(n *yaml.Node) error {
 		return nil
 	}
 
-	// Full form. A helper type so we do not recurse into our own Unmarshal.
+	// A helper type, so decoding does not recurse into this method.
 	type raw Health
 	var r raw
 	if err := n.Decode(&r); err != nil {

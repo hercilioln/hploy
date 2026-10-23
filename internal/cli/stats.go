@@ -33,18 +33,16 @@ func cmdStats() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "live view")
-	// 2s rather than 1s on purpose: each refresh costs ~31 ms of daemon CPU
-	// with 8 containers, and there is no point spending that twice as often.
+	// Each refresh costs daemon CPU, so the default is deliberately slow.
 	cmd.Flags().DurationVarP(&interval, "interval", "i", 2*time.Second,
 		"refresh interval in -w mode")
 	return cmd
 }
 
-// collect gathers one host reading plus one sample per running container. It
-// waits for the SECOND frame of each stream, because the first one has no
-// previous reading and would arrive without CPU.
+// collect gathers one host reading plus one sample per running container,
+// waiting for the second frame of each stream so CPU is populated.
 func collect(ctx context.Context, c *engine.Client) (host.Info, []engine.Sample, error) {
-	hi, _ := host.Read() // a partial error must not stop us showing the rest
+	hi, _ := host.Read() // a partial reading still beats showing nothing
 
 	list, err := c.List(ctx, false)
 	if err != nil {
@@ -129,7 +127,7 @@ func hostPanel(hi host.Info) string {
 
 	swapDetail := fmt.Sprintf("%s of %s", ui.Bytes(hi.SwapUsed), ui.Bytes(hi.SwapTotal))
 	if hi.SwapUsed > 0 {
-		// Swap in use on a small VPS is a sign of memory pressure.
+		// Any swap in use is worth flagging.
 		swapDetail = ui.Warn.Render(swapDetail)
 	}
 	t.Row("swap",
@@ -170,11 +168,8 @@ func containerTable(samples []engine.Sample, hostMem uint64) string {
 	return ui.Title.Render("containers") + "\n" + t.String()
 }
 
-// memoryCell shows usage and limit together.
-//
-// Without a visible limit, an unrestricted container shows an empty bar
-// (61 MB out of 8 GB is 0.7%) and looks broken. With "61MB/host" it is clear
-// that the reference is the whole machine, not a container limit.
+// memoryCell shows usage over limit, or "/host" when the container has none --
+// otherwise the bar sits at near-zero and looks broken.
 func memoryCell(s engine.Sample, hostMem uint64) string {
 	usage := ui.Bytes(s.MemUsage)
 	// Docker reports the host memory as the limit when none is set.

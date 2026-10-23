@@ -26,8 +26,7 @@ func cmdLogs() *cobra.Command {
 			}
 			defer r.Close()
 
-			// Raw output, no color and no table: logs exist to be piped into
-			// grep, less and redirection.
+			// Raw output: logs get piped.
 			_, err = io.Copy(os.Stdout, r)
 			switch {
 			case err == nil, errors.Is(err, io.EOF):

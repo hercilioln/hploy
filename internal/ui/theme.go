@@ -1,7 +1,5 @@
-// Package ui holds color, formatting and tables.
-//
-// Everything about appearance lives here: commands assemble data, never
-// colored strings. That way changing the theme means touching one file.
+// Package ui holds color, formatting and tables. Commands assemble data; only
+// this package renders it.
 package ui
 
 import (
@@ -42,8 +40,7 @@ func State(state, health string) string {
 	}
 }
 
-// Level colors a percentage by severity. The thresholds are shared by CPU,
-// memory and disk -- if they ever need to differ, they become a parameter.
+// Level colors a percentage by severity.
 func Level(p float64) lipgloss.Style {
 	switch {
 	case p >= 90:
@@ -55,8 +52,7 @@ func Level(p float64) lipgloss.Style {
 	}
 }
 
-// Bar draws a fixed-width gauge. We use block characters rather than the
-// Bubbles progress bar in non-interactive output so it stays readable when
+// Bar draws a fixed-width gauge with block characters, so it survives being
 // redirected to a file.
 func Bar(p float64, width int) string {
 	if p < 0 {
@@ -77,12 +73,8 @@ func Bar(p float64, width int) string {
 	return Level(p).Render(s)
 }
 
-// Bytes formats a byte count using base 1000 (kB, MB, GB).
-//
-// The docker CLI mixes the two bases -- memory in MiB (1024), network and disk
-// in MB (1000) -- which makes the same magnitude look different in adjacent
-// columns. We use a single base, so memory readings come out ~5% larger than
-// in `docker stats`. Same quantity, different unit.
+// Bytes formats a byte count in base 1000. The docker CLI mixes bases (MiB
+// for memory, MB for I/O); one base keeps columns comparable.
 func Bytes(b uint64) string {
 	const unit = 1000.0
 	f := float64(b)
@@ -101,7 +93,7 @@ func Bytes(b uint64) string {
 	return fmt.Sprintf("%.0fPB", f)
 }
 
-// Perc formats a percentage, or an em dash when the value does not exist yet.
+// Perc formats a percentage, or an em dash when there is no value yet.
 func Perc(p float64, hasValue bool) string {
 	if !hasValue {
 		return Dim.Render("—")

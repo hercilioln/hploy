@@ -1,7 +1,4 @@
-# Example app, used to exercise hploy without touching anything real.
-#
-# Brings up an nginx serving a page and a throwaway postgres. Both are official
-# images, so no build is involved.
+# Example app: an nginx and a throwaway postgres, both official images.
 #
 #   cd example && hploy plan
 version: 1
@@ -10,8 +7,7 @@ app: example
 domains:
   - example.localhost
 
-# The service that would receive traffic. It is the only one with a port: that
-# is how the proxy finds the app.
+# The service that receives traffic. Only this one has a port.
 web:
   image: nginx:1.29-alpine
   port: 80
@@ -23,7 +19,7 @@ web:
     memory: 64m
     cpus: "0.25"
 
-# Support service: no port, reachable only on the app's internal network.
+# Support service: no port, internal network only.
 services:
   db:
     image: postgres:17-alpine

@@ -43,16 +43,11 @@ type apiStats struct {
 	} `json:"blkio_stats"`
 }
 
-// Stats opens one stream per container and merges the samples into a single
-// channel.
+// Stats opens one stream per container and merges samples into one channel.
 //
-// We use stream=true on purpose: with stream=false the daemon collects two
-// samples internally before answering, which costs ~1.2s of waiting per call.
-// Streaming has it push one sample per second and we just read frames -- no
-// round-trip latency.
-//
-// Visible consequence: the FIRST frame has no previous reading, so there is no
-// CPU delta to compute. It arrives with HasCPU=false and the view shows "—".
+// stream=true avoids the round-trip wait of stream=false, where the daemon
+// collects two readings before answering. The first frame therefore arrives
+// with HasCPU=false.
 func (c *Client) Stats(ctx context.Context, ids []string) (<-chan Sample, <-chan error) {
 	samples := make(chan Sample, len(ids)*2)
 	errs := make(chan error, len(ids))
@@ -110,9 +105,8 @@ func convert(id string, s apiStats) Sample {
 		MemLimit: s.MemoryStats.Limit,
 	}
 
-	// CPU delta: how much the container consumed divided by how much the whole
-	// machine consumed over the same interval, times the number of cores. This
-	// is how `docker stats` itself arrives at the percentage.
+	// Container delta over machine delta, times cores -- the formula
+	// `docker stats` uses.
 	cpuDelta := float64(s.CPUStats.CPUUsage.TotalUsage) - float64(s.PreCPUStats.CPUUsage.TotalUsage)
 	sysDelta := float64(s.CPUStats.SystemUsage) - float64(s.PreCPUStats.SystemUsage)
 	if sysDelta > 0 && cpuDelta >= 0 {
@@ -142,12 +136,8 @@ func convert(id string, s apiStats) Sample {
 	return sm
 }
 
-// realMem subtracts file cache from the memory usage.
-//
-// The raw `usage` field includes page cache, which makes a container look like
-// it is eating hundreds of MB when all it did was read files. `docker stats`
-// subtracts `inactive_file` (cgroup v2) or `total_inactive_file` (cgroup v1) --
-// we do the same so the numbers line up.
+// realMem subtracts page cache from usage, as `docker stats` does, so reading
+// files does not look like memory consumption.
 func realMem(s apiStats) uint64 {
 	usage := s.MemoryStats.Usage
 	for _, key := range []string{"inactive_file", "total_inactive_file"} {

@@ -1,8 +1,4 @@
-// Package host reads machine metrics straight from /proc.
-//
-// No external library on purpose: it is four text files and one syscall, and
-// reading them by hand is exactly what teaches you where the numbers from
-// `free` and `uptime` come from.
+// Package host reads machine metrics from /proc.
 package host
 
 import (
@@ -30,7 +26,7 @@ type Info struct {
 	Uptime    time.Duration
 }
 
-// MemUsed is what `free` calls "used": total minus what is available.
+// MemUsed matches what free reports as used.
 func (i Info) MemUsed() uint64 { return i.MemTotal - i.MemAvail }
 
 func (i Info) MemPerc() float64  { return perc(i.MemUsed(), i.MemTotal) }
@@ -44,8 +40,7 @@ func perc(part, total uint64) float64 {
 	return float64(part) / float64(total) * 100
 }
 
-// Read collects everything. A failure in one file does not stop the others:
-// the view shows zero for that field instead of showing nothing at all.
+// Read collects everything; a failure in one source does not stop the rest.
 func Read() (Info, error) {
 	i := Info{CPUs: runtime.NumCPU()}
 	var firstErr error
@@ -135,8 +130,7 @@ func (i *Info) readDisk(mount string) error {
 		return err
 	}
 	i.DiskTotal = st.Blocks * uint64(st.Bsize)
-	// Bavail is free space for an ordinary user; Bfree includes the blocks
-	// reserved for root, which is why `df` shows the smaller number.
+	// Bavail excludes the root reserve, matching df.
 	i.DiskFree = st.Bavail * uint64(st.Bsize)
 	return nil
 }

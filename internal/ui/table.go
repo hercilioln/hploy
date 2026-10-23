@@ -7,11 +7,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Table renders an auto-width table.
-//
-// We do not use the Lip Gloss table because we need to measure width ignoring
-// the color escape codes -- a styled cell has more bytes than visible
-// characters, and measuring wrong misaligns the entire column.
+// Table renders an auto-width table, measuring with lipgloss.Width so escape
+// codes do not count toward column width.
 type Table struct {
 	headers []string
 	rows    [][]string
@@ -22,7 +19,7 @@ func NewTable(headers ...string) *Table {
 	return &Table{headers: headers, right: map[int]bool{}}
 }
 
-// AlignRight marks numeric columns, which read better right-aligned.
+// AlignRight right-aligns the given columns.
 func (t *Table) AlignRight(cols ...int) *Table {
 	for _, c := range cols {
 		t.right[c] = true
@@ -76,7 +73,6 @@ func (t *Table) String() string {
 				line.WriteString("   ")
 			}
 		}
-		// Trailing spaces dirty the terminal and show up in diffs and pipes.
 		b.WriteString(strings.TrimRight(line.String(), " "))
 		b.WriteString("\n")
 	}
@@ -88,7 +84,7 @@ func (t *Table) String() string {
 	return b.String()
 }
 
-// Note formats a nothing-found message.
+// Note formats a dim informational line.
 func Note(format string, args ...any) string {
 	return Dim.Render(fmt.Sprintf(format, args...))
 }

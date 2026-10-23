@@ -1,7 +1,4 @@
 // Package cli wires up the command surface.
-//
-// House rule: a command assembles data and calls the ui package to render it.
-// No colored strings are written in here.
 package cli
 
 import (
@@ -22,8 +19,7 @@ var Version = "dev"
 var socketFlag string
 
 func Execute() {
-	// Ctrl+C has to close the stats stream and the log follow gracefully,
-	// not kill the process mid-frame.
+	// So Ctrl+C closes open streams instead of killing the process.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -50,8 +46,7 @@ func root() *cobra.Command {
 	return cmd
 }
 
-// dockerEngine returns a verified client. Failing here, with a clear message,
-// beats failing halfway through a command.
+// dockerEngine returns a client that already answered a ping.
 func dockerEngine(ctx context.Context) (*engine.Client, error) {
 	c := engine.New(socketFlag)
 	if _, err := c.Ping(ctx); err != nil {
