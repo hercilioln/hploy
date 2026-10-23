@@ -9,15 +9,22 @@ import (
 	"time"
 )
 
-// LabelApp e a etiqueta que marca um container como nosso. Usar label como
-// fonte de verdade do runtime significa que, se o daemon do hploy morrer, o
-// estado nao se perde -- e o `docker ps` continua legivel para humano.
+// LabelApp marks a container as ours. Using a label as the runtime source of
+// truth means that if the hploy daemon dies the state is not lost -- and
+// `docker ps` stays readable for a human.
 const LabelApp = "hploy.app"
 
-// LabelRelease guarda o commit que gerou a imagem.
+// LabelService names which service of the app this container is.
+const LabelService = "hploy.service"
+
+// LabelRelease records the commit the image was built from.
 const LabelRelease = "hploy.release"
 
-// resposta de GET /containers/json -- so os campos que usamos.
+// LabelSpecHash is the fingerprint of the resolved service config. See
+// spec.Service.Hash for why this exists.
+const LabelSpecHash = "hploy.spec-hash"
+
+// response of GET /containers/json -- only the fields we use.
 type apiContainer struct {
 	ID      string            `json:"Id"`
 	Names   []string          `json:"Names"`
@@ -34,40 +41,40 @@ type apiContainer struct {
 	} `json:"Ports"`
 }
 
-// O Docker nao devolve o estado de saude em campo proprio na listagem: ele
-// vem embutido no texto do Status, como "Up 2 hours (healthy)". E o que o
-// proprio CLI do Docker faz -- e evita um inspect por container.
+// Docker does not return health as its own field in the listing: it is baked
+// into the Status text, as "Up 2 hours (healthy)". This is what the docker CLI
+// itself does -- and it avoids one inspect call per container.
 var reHealth = regexp.MustCompile(`\((healthy|unhealthy|health: starting|starting)\)`)
 
-// List devolve os containers, ordenados com os nossos primeiro.
+// List returns the containers, ours first.
 func (c *Client) List(ctx context.Context, all bool) ([]Container, error) {
-	caminho := "/containers/json"
+	path := "/containers/json"
 	if all {
-		caminho += q("all", "1")
+		path += query("all", "1")
 	}
 
-	var brutos []apiContainer
-	if err := c.getJSON(ctx, caminho, &brutos); err != nil {
+	var raw []apiContainer
+	if err := c.getJSON(ctx, path, &raw); err != nil {
 		return nil, err
 	}
 
-	out := make([]Container, 0, len(brutos))
-	for _, b := range brutos {
+	out := make([]Container, 0, len(raw))
+	for _, r := range raw {
 		out = append(out, Container{
-			ID:        curto(b.ID),
-			Name:      nome(b.Names),
-			Image:     b.Image,
-			State:     b.State,
-			Status:    b.Status,
-			Health:    saude(b.Status),
-			App:       b.Labels[LabelApp],
-			CreatedAt: time.Unix(b.Created, 0),
-			Ports:     portas(b),
+			ID:        shortID(r.ID),
+			Name:      firstName(r.Names),
+			Image:     r.Image,
+			State:     r.State,
+			Status:    r.Status,
+			Health:    health(r.Status),
+			App:       r.Labels[LabelApp],
+			CreatedAt: time.Unix(r.Created, 0),
+			Ports:     ports(r),
 		})
 	}
 
-	// Nossos containers primeiro, depois alfabetico. Quem roda o comando
-	// quer ver o que e dele no topo.
+	// Our containers first, then alphabetical. Whoever runs the command wants
+	// to see their own stuff at the top.
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Managed() != out[j].Managed() {
 			return out[i].Managed()
@@ -77,23 +84,23 @@ func (c *Client) List(ctx context.Context, all bool) ([]Container, error) {
 	return out, nil
 }
 
-func curto(id string) string {
+func shortID(id string) string {
 	if len(id) > 12 {
 		return id[:12]
 	}
 	return id
 }
 
-// Os nomes vem com barra na frente ("/nginx-proxy") e um container pode ter
-// varios alias; o primeiro e o principal.
-func nome(nomes []string) string {
-	if len(nomes) == 0 {
-		return "<sem nome>"
+// Names arrive with a leading slash ("/nginx-proxy") and a container may have
+// several aliases; the first one is the primary.
+func firstName(names []string) string {
+	if len(names) == 0 {
+		return "<unnamed>"
 	}
-	return strings.TrimPrefix(nomes[0], "/")
+	return strings.TrimPrefix(names[0], "/")
 }
 
-func saude(status string) string {
+func health(status string) string {
 	m := reHealth.FindStringSubmatch(status)
 	if m == nil {
 		return ""
@@ -104,22 +111,22 @@ func saude(status string) string {
 	return m[1]
 }
 
-func portas(b apiContainer) []string {
-	vistas := map[string]bool{}
+func ports(r apiContainer) []string {
+	seen := map[string]bool{}
 	var out []string
-	for _, p := range b.Ports {
+	for _, p := range r.Ports {
 		var s string
 		if p.PublicPort != 0 {
 			ip := p.IP
 			if ip == "0.0.0.0" || ip == "::" {
-				ip = "*" // deixa obvio que esta aberto para fora
+				ip = "*" // make it obvious this is open to the world
 			}
 			s = fmt.Sprintf("%s:%d->%d/%s", ip, p.PublicPort, p.PrivatePort, p.Type)
 		} else {
 			s = fmt.Sprintf("%d/%s", p.PrivatePort, p.Type)
 		}
-		if !vistas[s] {
-			vistas[s] = true
+		if !seen[s] {
+			seen[s] = true
 			out = append(out, s)
 		}
 	}

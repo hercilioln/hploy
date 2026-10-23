@@ -8,53 +8,53 @@ import (
 	"strings"
 )
 
-// Hash resume a configuracao de um servico numa string curta.
+// Hash boils a service's configuration down to a short string.
 //
-// E o que torna o `apply` idempotente sem comparar campo por campo com o que
-// o Docker devolve -- comparacao que e um inferno, porque o daemon normaliza
-// valores (ordem de env, caminho de volume, unidade de memoria) e um diff
-// ingenuo acusaria diferenca onde nao ha.
+// This is what makes `apply` idempotent without comparing the desired config
+// field by field against what Docker returns -- a comparison that is misery,
+// because the daemon normalizes values (env order, volume paths, memory units)
+// and a naive diff would report differences that are not there.
 //
-// Em vez disso gravamos o hash como label no container. No apply seguinte:
+// Instead we store the hash as a container label. On the next apply:
 //
-//	hash igual     -> nada a fazer
-//	hash diferente -> recriar
+//	same hash      -> nothing to do
+//	different hash -> recreate
 //
-// O hash NAO inclui os valores de env, so os nomes: mudar uma senha nao deve
-// obrigar a recriar o container (isso e trabalho do deploy, nao do apply), e
-// segredo nao deve participar de identificador que fica visivel em label.
+// The hash does NOT include env values, only their names: changing a password
+// should not force a container recreate (that is deploy's job, not apply's),
+// and a secret has no business inside an identifier that sits in a visible
+// Docker label.
 func (sv *Service) Hash(app string, env map[string]string) string {
 	h := sha256.New()
 
-	escreve := func(formato string, args ...any) {
-		fmt.Fprintf(h, formato+"\x00", args...)
+	write := func(format string, args ...any) {
+		fmt.Fprintf(h, format+"\x00", args...)
 	}
 
-	escreve("app=%s", app)
-	escreve("servico=%s", sv.nome)
-	escreve("imagem=%s", sv.Image)
-	escreve("comando=%s", strings.Join(sv.Command, "\x1f"))
-	escreve("porta=%d", sv.Port)
-	escreve("memoria=%d", uint64(sv.Resources.Memory))
-	escreve("cpus=%s", sv.Resources.CPUs)
-	escreve("saude=%s", sv.Health.String())
+	write("app=%s", app)
+	write("service=%s", sv.name)
+	write("image=%s", sv.Image)
+	write("command=%s", strings.Join(sv.Command, "\x1f"))
+	write("port=%d", sv.Port)
+	write("memory=%d", uint64(sv.Resources.Memory))
+	write("cpus=%s", sv.Resources.CPUs)
+	write("health=%s", sv.Health.String())
 
-	// Volumes e env em ordem: a ordem no arquivo nao deve mudar o hash.
+	// Volumes and env sorted: the order in the file must not change the hash.
 	vols := append([]string{}, sv.Volumes...)
 	sort.Strings(vols)
-	escreve("volumes=%s", strings.Join(vols, "\x1f"))
+	write("volumes=%s", strings.Join(vols, "\x1f"))
 
-	nomes := sv.EnvNames()
-	escreve("env=%s", strings.Join(nomes, "\x1f"))
+	write("env=%s", strings.Join(sv.EnvNames(), "\x1f"))
 
-	// Os literais SAO configuracao, nao segredo: entram com valor.
-	chaves := make([]string, 0, len(sv.Env.Literal))
+	// Literals ARE configuration, not secrets: they go in with their values.
+	keys := make([]string, 0, len(sv.Env.Literal))
 	for k := range sv.Env.Literal {
-		chaves = append(chaves, k)
+		keys = append(keys, k)
 	}
-	sort.Strings(chaves)
-	for _, k := range chaves {
-		escreve("literal=%s=%s", k, sv.Env.Literal[k])
+	sort.Strings(keys)
+	for _, k := range keys {
+		write("literal=%s=%s", k, sv.Env.Literal[k])
 	}
 
 	return hex.EncodeToString(h.Sum(nil))[:16]

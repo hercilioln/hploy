@@ -7,7 +7,7 @@ import (
 	"sync"
 )
 
-// resposta de GET /containers/{id}/stats -- so o que usamos.
+// response of GET /containers/{id}/stats -- only what we use.
 type apiStats struct {
 	Name     string `json:"name"`
 	ID       string `json:"id"`
@@ -43,41 +43,42 @@ type apiStats struct {
 	} `json:"blkio_stats"`
 }
 
-// Stats abre um stream por container e devolve as amostras num canal unico.
+// Stats opens one stream per container and merges the samples into a single
+// channel.
 //
-// Usamos stream=true de proposito: com stream=false o daemon coleta duas
-// amostras internamente e so entao responde, o que custa ~1,2s de espera por
-// chamada. Em streaming ele empurra uma amostra por segundo e nos so lemos os
-// quadros -- sem latencia de ida e volta.
+// We use stream=true on purpose: with stream=false the daemon collects two
+// samples internally before answering, which costs ~1.2s of waiting per call.
+// Streaming has it push one sample per second and we just read frames -- no
+// round-trip latency.
 //
-// Consequencia visivel: o PRIMEIRO quadro nao tem leitura anterior, entao nao
-// da para calcular delta de CPU. Ele vem com HasCPU=false e a tela mostra "—".
+// Visible consequence: the FIRST frame has no previous reading, so there is no
+// CPU delta to compute. It arrives with HasCPU=false and the view shows "—".
 func (c *Client) Stats(ctx context.Context, ids []string) (<-chan Sample, <-chan error) {
-	amostras := make(chan Sample, len(ids)*2)
-	erros := make(chan error, len(ids))
+	samples := make(chan Sample, len(ids)*2)
+	errs := make(chan error, len(ids))
 
 	var wg sync.WaitGroup
 	for _, id := range ids {
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
-			if err := c.streamOne(ctx, id, amostras); err != nil && ctx.Err() == nil {
-				erros <- err
+			if err := c.streamOne(ctx, id, samples); err != nil && ctx.Err() == nil {
+				errs <- err
 			}
 		}(id)
 	}
 
 	go func() {
 		wg.Wait()
-		close(amostras)
-		close(erros)
+		close(samples)
+		close(errs)
 	}()
 
-	return amostras, erros
+	return samples, errs
 }
 
 func (c *Client) streamOne(ctx context.Context, id string, out chan<- Sample) error {
-	resp, err := c.do(ctx, "/containers/"+id+"/stats"+q("stream", "true"))
+	resp, err := c.do(ctx, "/containers/"+id+"/stats"+query("stream", "true"))
 	if err != nil {
 		return err
 	}
@@ -87,75 +88,75 @@ func (c *Client) streamOne(ctx context.Context, id string, out chan<- Sample) er
 	for {
 		var s apiStats
 		if err := dec.Decode(&s); err != nil {
-			// Fim do stream, container parou, ou cancelamento: nao e erro.
+			// End of stream, container stopped, or cancellation: not an error.
 			if ctx.Err() != nil {
 				return nil
 			}
 			return err
 		}
 		select {
-		case out <- converte(id, s):
+		case out <- convert(id, s):
 		case <-ctx.Done():
 			return nil
 		}
 	}
 }
 
-func converte(id string, s apiStats) Sample {
-	am := Sample{
-		ID:       curto(id),
+func convert(id string, s apiStats) Sample {
+	sm := Sample{
+		ID:       shortID(id),
 		Name:     strings.TrimPrefix(s.Name, "/"),
-		MemUsage: memReal(s),
+		MemUsage: realMem(s),
 		MemLimit: s.MemoryStats.Limit,
 	}
 
-	// Delta de CPU: quanto o container consumiu dividido por quanto a maquina
-	// inteira consumiu no mesmo intervalo, multiplicado pelo numero de nucleos.
-	// E assim que o proprio `docker stats` chega no percentual.
+	// CPU delta: how much the container consumed divided by how much the whole
+	// machine consumed over the same interval, times the number of cores. This
+	// is how `docker stats` itself arrives at the percentage.
 	cpuDelta := float64(s.CPUStats.CPUUsage.TotalUsage) - float64(s.PreCPUStats.CPUUsage.TotalUsage)
 	sysDelta := float64(s.CPUStats.SystemUsage) - float64(s.PreCPUStats.SystemUsage)
 	if sysDelta > 0 && cpuDelta >= 0 {
-		nucleos := float64(s.CPUStats.OnlineCPUs)
-		if nucleos == 0 {
-			nucleos = float64(len(s.CPUStats.CPUUsage.PercpuUsage))
+		cores := float64(s.CPUStats.OnlineCPUs)
+		if cores == 0 {
+			cores = float64(len(s.CPUStats.CPUUsage.PercpuUsage))
 		}
-		if nucleos == 0 {
-			nucleos = 1
+		if cores == 0 {
+			cores = 1
 		}
-		am.CPUPerc = cpuDelta / sysDelta * nucleos * 100
-		am.HasCPU = true
+		sm.CPUPerc = cpuDelta / sysDelta * cores * 100
+		sm.HasCPU = true
 	}
 
 	for _, n := range s.Networks {
-		am.NetRx += n.RxBytes
-		am.NetTx += n.TxBytes
+		sm.NetRx += n.RxBytes
+		sm.NetTx += n.TxBytes
 	}
 	for _, b := range s.BlkioStats.IoServiceBytesRecursive {
 		switch strings.ToLower(b.Op) {
 		case "read":
-			am.BlkRead += b.Value
+			sm.BlkRead += b.Value
 		case "write":
-			am.BlkWrite += b.Value
+			sm.BlkWrite += b.Value
 		}
 	}
-	return am
+	return sm
 }
 
-// memReal desconta o cache de arquivo do uso de memoria.
+// realMem subtracts file cache from the memory usage.
 //
-// O campo `usage` cru inclui page cache, o que faz um container parecer estar
-// consumindo centenas de MB quando na verdade so leu arquivos. O `docker
-// stats` subtrai `inactive_file` (cgroup v2) ou `total_inactive_file`
-// (cgroup v1) -- fazemos o mesmo para os numeros baterem.
-func memReal(s apiStats) uint64 {
-	uso := s.MemoryStats.Usage
-	for _, chave := range []string{"inactive_file", "total_inactive_file"} {
-		if v, ok := s.MemoryStats.Stats[chave]; ok {
-			if v < uso {
-				return uso - v
+// The raw `usage` field includes page cache, which makes a container look like
+// it is eating hundreds of MB when all it did was read files. `docker stats`
+// subtracts `inactive_file` (cgroup v2) or `total_inactive_file` (cgroup v1) --
+// we do the same so the numbers line up.
+func realMem(s apiStats) uint64 {
+	usage := s.MemoryStats.Usage
+	for _, key := range []string{"inactive_file", "total_inactive_file"} {
+		if v, ok := s.MemoryStats.Stats[key]; ok {
+			if v < usage {
+				return usage - v
 			}
 			return 0
 		}
 	}
-	return uso
+	return usage
 }

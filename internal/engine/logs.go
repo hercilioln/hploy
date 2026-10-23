@@ -8,12 +8,12 @@ import (
 	"strconv"
 )
 
-// Logs devolve o stream de log do container, ja desmultiplexado.
+// Logs returns the container's log stream, already demultiplexed.
 //
-// A pegadinha: quando o container NAO tem TTY, o Docker entrega o stream em
-// quadros com cabecalho binario de 8 bytes (tipo do stream + tamanho), e nao
-// texto puro. Jogar isso direto na tela imprime lixo no comeco de cada linha.
-// Containers com TTY vem crus. Por isso consultamos o Tty antes.
+// The gotcha: when the container has NO TTY, Docker delivers the stream in
+// frames with an 8-byte binary header (stream type + size), not plain text.
+// Dumping that straight to the screen prints garbage at the start of every
+// line. Containers with a TTY come through raw. Hence the Tty lookup first.
 func (c *Client) Logs(ctx context.Context, id string, opt LogOptions) (io.ReadCloser, error) {
 	tty, err := c.hasTTY(ctx, id)
 	if err != nil {
@@ -24,17 +24,17 @@ func (c *Client) Logs(ctx context.Context, id string, opt LogOptions) (io.ReadCl
 	if tail == "" {
 		tail = "100"
 	}
-	pares := []string{
+	pairs := []string{
 		"stdout", "1",
 		"stderr", "1",
 		"tail", tail,
 		"follow", strconv.FormatBool(opt.Follow),
 	}
 	if opt.Timestamps {
-		pares = append(pares, "timestamps", "1")
+		pairs = append(pairs, "timestamps", "1")
 	}
 
-	resp, err := c.do(ctx, "/containers/"+id+"/logs"+q(pares...))
+	resp, err := c.do(ctx, "/containers/"+id+"/logs"+query(pairs...))
 	if err != nil {
 		return nil, err
 	}
@@ -56,44 +56,44 @@ func (c *Client) hasTTY(ctx context.Context, id string) (bool, error) {
 	return insp.Config.Tty, nil
 }
 
-// demux remove os cabecalhos de quadro do stream multiplexado.
+// demux strips the frame headers from the multiplexed stream.
 //
-// Formato de cada quadro:
+// Frame layout:
 //
-//	byte 0    tipo do stream (0 stdin, 1 stdout, 2 stderr)
-//	bytes 1-3 zeros
-//	bytes 4-7 tamanho do payload, uint32 big-endian
-//	resto     o payload
+//	byte 0     stream type (0 stdin, 1 stdout, 2 stderr)
+//	bytes 1-3  zeros
+//	bytes 4-7  payload size, big-endian uint32
+//	rest       the payload
 //
-// Nao separamos stdout de stderr: para ver log, intercalado na ordem em que
-// aconteceu e o que serve.
+// We do not split stdout from stderr: for reading logs, interleaved in the
+// order things happened is what you want.
 type demux struct {
-	src   io.ReadCloser
-	resto int // bytes do quadro atual ainda nao lidos
+	src       io.ReadCloser
+	remaining int // bytes left in the current frame
 }
 
 func (d *demux) Read(p []byte) (int, error) {
-	if d.resto == 0 {
-		var cab [8]byte
-		if _, err := io.ReadFull(d.src, cab[:]); err != nil {
+	if d.remaining == 0 {
+		var header [8]byte
+		if _, err := io.ReadFull(d.src, header[:]); err != nil {
 			return 0, err
 		}
-		tam := binary.BigEndian.Uint32(cab[4:8])
-		if tam == 0 {
-			return 0, nil // quadro vazio: o proximo Read busca o seguinte
+		size := binary.BigEndian.Uint32(header[4:8])
+		if size == 0 {
+			return 0, nil // empty frame: the next Read fetches the following one
 		}
-		// Guarda contra cabecalho corrompido virar alocacao absurda.
-		if tam > 16<<20 {
-			return 0, fmt.Errorf("quadro de log improvavel (%d bytes): stream fora de sincronia", tam)
+		// Guard against a corrupt header turning into an absurd allocation.
+		if size > 16<<20 {
+			return 0, fmt.Errorf("implausible log frame (%d bytes): stream out of sync", size)
 		}
-		d.resto = int(tam)
+		d.remaining = int(size)
 	}
 
-	if len(p) > d.resto {
-		p = p[:d.resto]
+	if len(p) > d.remaining {
+		p = p[:d.remaining]
 	}
 	n, err := d.src.Read(p)
-	d.resto -= n
+	d.remaining -= n
 	return n, err
 }
 

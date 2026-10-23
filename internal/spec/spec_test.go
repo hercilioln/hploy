@@ -1,158 +1,147 @@
 package spec
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-func TestExemploEValido(t *testing.T) {
-	s, err := Load("../../exemplo/hploy.yaml")
+func TestRepoExampleIsValid(t *testing.T) {
+	s, err := Load("../../example/hploy.yaml")
 	if err != nil {
-		t.Fatalf("o exemplo do repositorio nao deveria falhar: %v", err)
+		t.Fatalf("the example shipped in the repo must not fail: %v", err)
 	}
-	if s.App != "exemplo" {
-		t.Errorf("app = %q, queria \"exemplo\"", s.App)
+	if s.App != "example" {
+		t.Errorf("app = %q, want \"example\"", s.App)
 	}
 	if s.Web == nil || s.Web.Port != 80 {
-		t.Error("web deveria existir com porta 80")
+		t.Error("web should exist with port 80")
 	}
-	// O atalho "health: /" tem de virar um Health com Path e padroes.
+	// The "health: /" shorthand must become a Health with Path plus defaults.
 	if s.Web.Health == nil || s.Web.Health.Path != "/" {
-		t.Errorf("atalho de health nao virou Path: %+v", s.Web.Health)
+		t.Errorf("health shorthand did not become a Path: %+v", s.Web.Health)
 	}
 	if s.Web.Health.Retries != 5 {
-		t.Errorf("retries padrao = %d, queria 5", s.Web.Health.Retries)
+		t.Errorf("default retries = %d, want 5", s.Web.Health.Retries)
 	}
 	if got := s.Services["db"].Health.Cmd[0]; got != "pg_isready" {
-		t.Errorf("health.cmd do db = %q", got)
+		t.Errorf("db health.cmd = %q", got)
 	}
 	if s.Services["db"].Resources.Memory != 128<<20 {
-		t.Errorf("memory do db = %d", s.Services["db"].Resources.Memory)
+		t.Errorf("db memory = %d", s.Services["db"].Resources.Memory)
 	}
-	// A ordem de subida tem de deixar o web por ultimo.
-	ordem := s.EmOrdemDeSubida()
-	if ordem[len(ordem)-1] != s.Web {
-		t.Error("o web deveria subir por ultimo, depois do banco")
+	// Start order must leave web last.
+	order := s.StartOrder()
+	if order[len(order)-1] != s.Web {
+		t.Error("web should start last, after the database")
 	}
 }
 
-func TestValidacaoPegaOsErros(t *testing.T) {
-	casos := []struct {
-		nome   string
-		yaml   string
-		espera string
+func TestValidationCatchesMistakes(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want string
 	}{
 		{
-			nome: "servico de apoio com porta publicada",
+			name: "support service publishing a port",
 			yaml: `
 version: 1
-app: teste
+app: test
 services:
   db:
     image: postgres:17-alpine
     port: 5432
     resources: { memory: 64m }
 `,
-			espera: "port nao e permitida em servico de apoio",
+			want: "port is not allowed on a support service",
 		},
 		{
-			nome: "volume usado sem declarar",
+			name: "volume used without being declared",
 			yaml: `
 version: 1
-app: teste
+app: test
 services:
   db:
     image: postgres:17-alpine
-    volumes: ["fantasma:/dados"]
+    volumes: ["ghost:/data"]
     resources: { memory: 64m }
 `,
-			espera: "nao declarado no bloco volumes",
+			want: "not declared in the volumes block",
 		},
 		{
-			nome: "sem limite de memoria",
+			name: "no memory limit",
 			yaml: `
 version: 1
-app: teste
+app: test
 services:
   db:
     image: postgres:17-alpine
 `,
-			espera: "resources.memory nao definido",
+			want: "resources.memory is not set",
 		},
 		{
-			nome: "web sem dominio",
+			name: "web without a domain",
 			yaml: `
 version: 1
-app: teste
+app: test
 web:
   image: nginx:alpine
   port: 80
   resources: { memory: 64m }
 `,
-			espera: "domains e obrigatorio",
+			want: "domains is required",
 		},
 		{
-			nome: "campo desconhecido (typo)",
+			name: "unknown field (typo)",
 			yaml: `
 version: 1
-app: teste
+app: test
 web:
   image: nginx:alpine
   port: 80
   resorces: { memory: 64m }
 `,
-			espera: "field resorces not found",
+			want: "field resorces not found",
 		},
 		{
-			nome:   "nome de app invalido",
-			yaml:   "version: 1\napp: Exemplo_Com_Maiuscula\n",
-			espera: "invalido",
+			name: "invalid app name",
+			yaml: "version: 1\napp: Example_With_Caps\n",
+			want: "is invalid",
 		},
 	}
 
-	for _, c := range casos {
-		t.Run(c.nome, func(t *testing.T) {
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
 			_, err := Parse([]byte(c.yaml))
 			if err == nil {
-				t.Fatal("esperava erro, nao veio nenhum")
+				t.Fatal("expected an error, got none")
 			}
-			if !contem(err.Error(), c.espera) {
-				t.Errorf("erro foi %q, esperava conter %q", err, c.espera)
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error was %q, want it to contain %q", err, c.want)
 			}
 		})
 	}
 }
 
-func TestHashEstavelEsensivel(t *testing.T) {
-	s, err := Load("../../exemplo/hploy.yaml")
+func TestHashIsStableAndSensitive(t *testing.T) {
+	s, err := Load("../../example/hploy.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	a := s.Web.Hash(s.App, nil)
-	b := s.Web.Hash(s.App, nil)
-	if a != b {
-		t.Error("o hash tem de ser estavel entre chamadas")
+	if b := s.Web.Hash(s.App, nil); a != b {
+		t.Error("the hash must be stable across calls")
 	}
 
-	// Valor de segredo NAO entra no hash: trocar senha nao recria container.
-	c := s.Web.Hash(s.App, map[string]string{"SENHA": "outra"})
-	if a != c {
-		t.Error("valor de env nao deveria mudar o hash")
+	// A secret value must NOT enter the hash: changing a password should not
+	// recreate the container.
+	if c := s.Web.Hash(s.App, map[string]string{"SECRET": "other"}); a != c {
+		t.Error("an env value should not change the hash")
 	}
 
-	// Mas mudar a imagem tem de mudar.
+	// But changing the image must change it.
 	s.Web.Image = "nginx:1.28-alpine"
 	if s.Web.Hash(s.App, nil) == a {
-		t.Error("mudar a imagem tinha de mudar o hash")
+		t.Error("changing the image should have changed the hash")
 	}
-}
-
-func contem(s, sub string) bool {
-	return len(sub) == 0 || (len(s) >= len(sub) && indexOf(s, sub) >= 0)
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }

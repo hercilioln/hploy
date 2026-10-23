@@ -1,7 +1,7 @@
-// Package ui concentra cor, formatacao e tabela.
+// Package ui holds color, formatting and tables.
 //
-// Tudo que e aparencia mora aqui: os comandos montam dados, nunca strings
-// coloridas. Assim trocar o tema e mexer num arquivo.
+// Everything about appearance lives here: commands assemble data, never
+// colored strings. That way changing the theme means touching one file.
 package ui
 
 import (
@@ -12,106 +12,105 @@ import (
 )
 
 var (
-	Titulo    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-	Cabecalho = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("244"))
-	Apagado   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	Nosso     = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	Title  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
+	Header = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("244"))
+	Dim    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	Ours   = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 
-	OK      = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	Atencao = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	Ruim    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	Good = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	Warn = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	Bad  = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 )
 
-// Estado colore o estado do container.
-func Estado(estado, saude string) string {
-	texto := estado
-	if saude != "" {
-		texto += " · " + saude
+// State colors a container state.
+func State(state, health string) string {
+	text := state
+	if health != "" {
+		text += " · " + health
 	}
 	switch {
-	case saude == "unhealthy":
-		return Ruim.Render(texto)
-	case saude == "starting":
-		return Atencao.Render(texto)
-	case estado == "running":
-		return OK.Render(texto)
-	case estado == "exited", estado == "dead":
-		return Ruim.Render(texto)
+	case health == "unhealthy":
+		return Bad.Render(text)
+	case health == "starting":
+		return Warn.Render(text)
+	case state == "running":
+		return Good.Render(text)
+	case state == "exited", state == "dead":
+		return Bad.Render(text)
 	default:
-		return Apagado.Render(texto)
+		return Dim.Render(text)
 	}
 }
 
-// Nivel colore um percentual segundo a gravidade. Os limites sao os mesmos
-// para CPU, memoria e disco -- se um dia divergirem, viram parametro.
-func Nivel(p float64) lipgloss.Style {
+// Level colors a percentage by severity. The thresholds are shared by CPU,
+// memory and disk -- if they ever need to differ, they become a parameter.
+func Level(p float64) lipgloss.Style {
 	switch {
 	case p >= 90:
-		return Ruim
+		return Bad
 	case p >= 70:
-		return Atencao
+		return Warn
 	default:
-		return OK
+		return Good
 	}
 }
 
-// Barra desenha um medidor de largura fixa. Usamos blocos cheios em vez da
-// barra do Bubbles no modo nao-interativo para a saida continuar legivel
-// quando redirecionada para arquivo.
-func Barra(p float64, largura int) string {
+// Bar draws a fixed-width gauge. We use block characters rather than the
+// Bubbles progress bar in non-interactive output so it stays readable when
+// redirected to a file.
+func Bar(p float64, width int) string {
 	if p < 0 {
 		p = 0
 	}
 	if p > 100 {
 		p = 100
 	}
-	cheios := int(p / 100 * float64(largura))
+	filled := int(p / 100 * float64(width))
 	s := ""
-	for i := 0; i < largura; i++ {
-		if i < cheios {
+	for i := 0; i < width; i++ {
+		if i < filled {
 			s += "█"
 		} else {
 			s += "░"
 		}
 	}
-	return Nivel(p).Render(s)
+	return Level(p).Render(s)
 }
 
-// Bytes formata em unidade legivel usando base 1000 (kB, MB, GB).
+// Bytes formats a byte count using base 1000 (kB, MB, GB).
 //
-// O CLI do docker mistura as duas bases -- memoria em MiB (1024) e rede/disco
-// em MB (1000) -- o que faz o mesmo numero aparecer diferente em colunas
-// vizinhas. Aqui usamos uma base so, entao os valores de memoria aparecem
-// ~5% maiores que no `docker stats`. E a mesma grandeza, outra unidade.
+// The docker CLI mixes the two bases -- memory in MiB (1024), network and disk
+// in MB (1000) -- which makes the same magnitude look different in adjacent
+// columns. We use a single base, so memory readings come out ~5% larger than
+// in `docker stats`. Same quantity, different unit.
 func Bytes(b uint64) string {
-	const u = 1000.0
+	const unit = 1000.0
 	f := float64(b)
-	if f < u {
+	if f < unit {
 		return fmt.Sprintf("%dB", b)
 	}
-	unidades := []string{"kB", "MB", "GB", "TB", "PB"}
-	for _, un := range unidades {
-		f /= u
-		if f < u {
+	for _, suffix := range []string{"kB", "MB", "GB", "TB", "PB"} {
+		f /= unit
+		if f < unit {
 			if f < 10 {
-				return fmt.Sprintf("%.1f%s", f, un)
+				return fmt.Sprintf("%.1f%s", f, suffix)
 			}
-			return fmt.Sprintf("%.0f%s", f, un)
+			return fmt.Sprintf("%.0f%s", f, suffix)
 		}
 	}
 	return fmt.Sprintf("%.0fPB", f)
 }
 
-// Perc formata percentual, ou travessao quando o valor ainda nao existe.
-func Perc(p float64, temValor bool) string {
-	if !temValor {
-		return Apagado.Render("—")
+// Perc formats a percentage, or an em dash when the value does not exist yet.
+func Perc(p float64, hasValue bool) string {
+	if !hasValue {
+		return Dim.Render("—")
 	}
 	return fmt.Sprintf("%.1f%%", p)
 }
 
-// Duracao devolve forma compacta: 3d4h, 5h12m, 42s.
-func Duracao(d time.Duration) string {
+// Duration returns a compact form: 3d4h, 5h12m, 42s.
+func Duration(d time.Duration) string {
 	switch {
 	case d >= 24*time.Hour:
 		return fmt.Sprintf("%dd%dh", int(d.Hours())/24, int(d.Hours())%24)

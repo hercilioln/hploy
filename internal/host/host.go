@@ -1,8 +1,8 @@
-// Package host le as metricas da maquina direto do /proc.
+// Package host reads machine metrics straight from /proc.
 //
-// Sem biblioteca externa de proposito: sao quatro arquivos de texto e uma
-// syscall, e ler isso a mao e justamente o que ensina onde os numeros do
-// `free` e do `uptime` nascem.
+// No external library on purpose: it is four text files and one syscall, and
+// reading them by hand is exactly what teaches you where the numbers from
+// `free` and `uptime` come from.
 package host
 
 import (
@@ -30,41 +30,39 @@ type Info struct {
 	Uptime    time.Duration
 }
 
-// MemUsed e o que o `free` chama de "used": total menos o que esta disponivel.
+// MemUsed is what `free` calls "used": total minus what is available.
 func (i Info) MemUsed() uint64 { return i.MemTotal - i.MemAvail }
 
 func (i Info) MemPerc() float64  { return perc(i.MemUsed(), i.MemTotal) }
 func (i Info) SwapPerc() float64 { return perc(i.SwapUsed, i.SwapTotal) }
-func (i Info) DiskPerc() float64 {
-	return perc(i.DiskTotal-i.DiskFree, i.DiskTotal)
-}
+func (i Info) DiskPerc() float64 { return perc(i.DiskTotal-i.DiskFree, i.DiskTotal) }
 
-func perc(parte, total uint64) float64 {
+func perc(part, total uint64) float64 {
 	if total == 0 {
 		return 0
 	}
-	return float64(parte) / float64(total) * 100
+	return float64(part) / float64(total) * 100
 }
 
-// Read coleta tudo. Falha em um arquivo nao impede os outros: a tela mostra
-// zero no campo em vez de nao mostrar nada.
+// Read collects everything. A failure in one file does not stop the others:
+// the view shows zero for that field instead of showing nothing at all.
 func Read() (Info, error) {
 	i := Info{CPUs: runtime.NumCPU()}
-	var primeiroErro error
-	guarda := func(err error) {
-		if err != nil && primeiroErro == nil {
-			primeiroErro = err
+	var firstErr error
+	keep := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 
-	guarda(i.lerMeminfo())
-	guarda(i.lerLoadavg())
-	guarda(i.lerUptime())
-	guarda(i.lerDisco("/"))
-	return i, primeiroErro
+	keep(i.readMeminfo())
+	keep(i.readLoadavg())
+	keep(i.readUptime())
+	keep(i.readDisk("/"))
+	return i, firstErr
 }
 
-func (i *Info) lerMeminfo() error {
+func (i *Info) readMeminfo() error {
 	f, err := os.Open("/proc/meminfo")
 	if err != nil {
 		return err
@@ -74,17 +72,17 @@ func (i *Info) lerMeminfo() error {
 	var swapFree uint64
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		campos := strings.Fields(sc.Text())
-		if len(campos) < 2 {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 2 {
 			continue
 		}
-		// Os valores vem em kB.
-		v, err := strconv.ParseUint(campos[1], 10, 64)
+		// Values come in kB.
+		v, err := strconv.ParseUint(fields[1], 10, 64)
 		if err != nil {
 			continue
 		}
 		v *= 1024
-		switch strings.TrimSuffix(campos[0], ":") {
+		switch strings.TrimSuffix(fields[0], ":") {
 		case "MemTotal":
 			i.MemTotal = v
 		case "MemAvailable":
@@ -99,31 +97,31 @@ func (i *Info) lerMeminfo() error {
 	return sc.Err()
 }
 
-func (i *Info) lerLoadavg() error {
+func (i *Info) readLoadavg() error {
 	b, err := os.ReadFile("/proc/loadavg")
 	if err != nil {
 		return err
 	}
-	campos := strings.Fields(string(b))
-	if len(campos) < 3 {
-		return fmt.Errorf("/proc/loadavg em formato inesperado")
+	fields := strings.Fields(string(b))
+	if len(fields) < 3 {
+		return fmt.Errorf("unexpected format in /proc/loadavg")
 	}
-	i.Load1, _ = strconv.ParseFloat(campos[0], 64)
-	i.Load5, _ = strconv.ParseFloat(campos[1], 64)
-	i.Load15, _ = strconv.ParseFloat(campos[2], 64)
+	i.Load1, _ = strconv.ParseFloat(fields[0], 64)
+	i.Load5, _ = strconv.ParseFloat(fields[1], 64)
+	i.Load15, _ = strconv.ParseFloat(fields[2], 64)
 	return nil
 }
 
-func (i *Info) lerUptime() error {
+func (i *Info) readUptime() error {
 	b, err := os.ReadFile("/proc/uptime")
 	if err != nil {
 		return err
 	}
-	campos := strings.Fields(string(b))
-	if len(campos) < 1 {
-		return fmt.Errorf("/proc/uptime em formato inesperado")
+	fields := strings.Fields(string(b))
+	if len(fields) < 1 {
+		return fmt.Errorf("unexpected format in /proc/uptime")
 	}
-	s, err := strconv.ParseFloat(campos[0], 64)
+	s, err := strconv.ParseFloat(fields[0], 64)
 	if err != nil {
 		return err
 	}
@@ -131,14 +129,14 @@ func (i *Info) lerUptime() error {
 	return nil
 }
 
-func (i *Info) lerDisco(ponto string) error {
+func (i *Info) readDisk(mount string) error {
 	var st syscall.Statfs_t
-	if err := syscall.Statfs(ponto, &st); err != nil {
+	if err := syscall.Statfs(mount, &st); err != nil {
 		return err
 	}
 	i.DiskTotal = st.Blocks * uint64(st.Bsize)
-	// Bavail e o espaco livre para usuario comum; Bfree inclui o reservado
-	// para o root, e e por isso que o `df` mostra numero menor.
+	// Bavail is free space for an ordinary user; Bfree includes the blocks
+	// reserved for root, which is why `df` shows the smaller number.
 	i.DiskFree = st.Bavail * uint64(st.Bsize)
 	return nil
 }

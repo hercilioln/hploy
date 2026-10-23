@@ -11,71 +11,71 @@ import (
 )
 
 func cmdPs() *cobra.Command {
-	var todos bool
+	var all bool
 	cmd := &cobra.Command{
 		Use:     "ps",
-		Short:   "Lista os containers da maquina",
+		Short:   "List the containers on the machine",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			c, err := motor(cmd.Context())
+			c, err := dockerEngine(cmd.Context())
 			if err != nil {
 				return err
 			}
-			lista, err := c.List(cmd.Context(), todos)
+			list, err := c.List(cmd.Context(), all)
 			if err != nil {
 				return err
 			}
-			if len(lista) == 0 {
-				fmt.Println(ui.Aviso("nenhum container encontrado"))
+			if len(list) == 0 {
+				fmt.Println(ui.Note("no containers found"))
 				return nil
 			}
 
-			t := ui.NewTable("nome", "app", "estado", "imagem", "portas", "criado")
-			for _, ct := range lista {
-				app := ui.Apagado.Render("—")
+			t := ui.NewTable("name", "app", "state", "image", "ports", "created")
+			for _, ct := range list {
+				app := ui.Dim.Render("—")
 				if ct.Managed() {
-					app = ui.Nosso.Render(ct.App)
+					app = ui.Ours.Render(ct.App)
 				}
 				t.Row(
 					ct.Name,
 					app,
-					ui.Estado(ct.State, ct.Health),
-					encurta(ct.Image, 34),
-					portas(ct),
-					ui.Duracao(idade(ct)),
+					ui.State(ct.State, ct.Health),
+					truncate(ct.Image, 34),
+					portList(ct),
+					ui.Duration(time.Since(ct.CreatedAt)),
 				)
 			}
 			fmt.Print(t.String())
 
-			geridos := 0
-			for _, ct := range lista {
+			managed := 0
+			for _, ct := range list {
 				if ct.Managed() {
-					geridos++
+					managed++
 				}
 			}
 			fmt.Println()
-			fmt.Println(ui.Aviso("%d containers, %d geridos pelo hploy", len(lista), geridos))
+			fmt.Println(ui.Note("%d containers, %d managed by hploy", len(list), managed))
 			return nil
 		},
 	}
-	cmd.Flags().BoolVarP(&todos, "all", "a", false, "inclui containers parados")
+	cmd.Flags().BoolVarP(&all, "all", "a", false, "include stopped containers")
 	return cmd
 }
 
-func portas(ct engine.Container) string {
+func portList(ct engine.Container) string {
 	if len(ct.Ports) == 0 {
-		return ui.Apagado.Render("—")
+		return ui.Dim.Render("—")
 	}
 	s := strings.Join(ct.Ports, " ")
-	// Porta publicada em todas as interfaces merece destaque: e o erro que
-	// expoe banco de dados para a internet.
+	// A port published on every interface deserves attention: that is the
+	// mistake that exposes a database to the internet.
 	if strings.Contains(s, "*:") {
-		return ui.Atencao.Render(encurta(s, 28))
+		return ui.Warn.Render(truncate(s, 28))
 	}
-	return ui.Apagado.Render(encurta(s, 28))
+	return ui.Dim.Render(truncate(s, 28))
 }
 
-func encurta(s string, max int) string {
+func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
@@ -83,8 +83,4 @@ func encurta(s string, max int) string {
 		return s[:max]
 	}
 	return s[:max-1] + "…"
-}
-
-func idade(ct engine.Container) time.Duration {
-	return time.Since(ct.CreatedAt)
 }

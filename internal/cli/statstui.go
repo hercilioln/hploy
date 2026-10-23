@@ -10,40 +10,38 @@ import (
 	"github.com/hercilioln/hploy/internal/engine"
 	"github.com/hercilioln/hploy/internal/host"
 	"github.com/hercilioln/hploy/internal/ui"
-	"github.com/spf13/cobra"
 )
 
-// A TUI segue a arquitetura Elm do Bubble Tea: Init dispara efeitos, Update
-// recebe mensagens e devolve novo estado, View desenha a partir do estado.
-// Nada de I/O no View.
+// The TUI follows Bubble Tea's Elm architecture: Init fires effects, Update
+// takes messages and returns new state, View draws from state. No I/O in View.
 //
-// Decisao de arquitetura: a coleta roda no SERVIDOR e o desenho no CLIENTE.
-// Por isso o modelo so guarda numeros ja prontos -- se um dia o hploy falar
-// com um daemon remoto, so a origem da mensagem muda.
-type modeloStats struct {
-	motor     *engine.Client
-	intervalo time.Duration
+// Architectural decision: sampling runs on the SERVER, drawing on the CLIENT.
+// That is why the model only holds finished numbers -- if hploy ever talks to
+// a remote daemon, only the origin of the message changes.
+type statsModel struct {
+	engine   *engine.Client
+	interval time.Duration
 
-	hi       host.Info
-	amostras []engine.Sample
-	erro     error
+	hi      host.Info
+	samples []engine.Sample
+	err     error
 
-	largura int
-	altura  int
-	tiques  int
-	pausado bool
+	width  int
+	height int
+	ticks  int
+	paused bool
 }
 
-type msgAmostra struct {
-	hi       host.Info
-	amostras []engine.Sample
-	erro     error
+type sampleMsg struct {
+	hi      host.Info
+	samples []engine.Sample
+	err     error
 }
 
-type msgTique time.Time
+type tickMsg time.Time
 
-func rodarTUI(ctx context.Context, c *engine.Client, intervalo time.Duration) error {
-	m := modeloStats{motor: c, intervalo: intervalo}
+func runTUI(ctx context.Context, c *engine.Client, interval time.Duration) error {
+	m := statsModel{engine: c, interval: interval}
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx))
 	_, err := p.Run()
 	if err != nil && ctx.Err() != nil {
@@ -52,81 +50,77 @@ func rodarTUI(ctx context.Context, c *engine.Client, intervalo time.Duration) er
 	return err
 }
 
-func (m modeloStats) Init() tea.Cmd {
-	return tea.Batch(m.coletarCmd(), tique(m.intervalo))
+func (m statsModel) Init() tea.Cmd {
+	return tea.Batch(m.collectCmd(), tick(m.interval))
 }
 
-func (m modeloStats) coletarCmd() tea.Cmd {
-	motor := m.motor
+func (m statsModel) collectCmd() tea.Cmd {
+	eng := m.engine
 	return func() tea.Msg {
-		// Context proprio: uma coleta travada nao pode congelar a tela.
+		// Its own context: a stuck collection must not freeze the view.
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		hi, amostras, err := coletar(ctx, motor)
-		return msgAmostra{hi: hi, amostras: amostras, erro: err}
+		hi, samples, err := collect(ctx, eng)
+		return sampleMsg{hi: hi, samples: samples, err: err}
 	}
 }
 
-func tique(d time.Duration) tea.Cmd {
-	return tea.Tick(d, func(t time.Time) tea.Msg { return msgTique(t) })
+func tick(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-func (m modeloStats) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m statsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "q", "esc", "ctrl+c":
 			return m, tea.Quit
 		case "p", " ":
-			m.pausado = !m.pausado
+			m.paused = !m.paused
 			return m, nil
 		case "r":
-			return m, m.coletarCmd()
+			return m, m.collectCmd()
 		}
 
 	case tea.WindowSizeMsg:
-		m.largura, m.altura = msg.Width, msg.Height
+		m.width, m.height = msg.Width, msg.Height
 
-	case msgAmostra:
-		m.hi, m.amostras, m.erro = msg.hi, msg.amostras, msg.erro
-		m.tiques++
+	case sampleMsg:
+		m.hi, m.samples, m.err = msg.hi, msg.samples, msg.err
+		m.ticks++
 
-	case msgTique:
-		if m.pausado {
-			return m, tique(m.intervalo)
+	case tickMsg:
+		if m.paused {
+			return m, tick(m.interval)
 		}
-		return m, tea.Batch(m.coletarCmd(), tique(m.intervalo))
+		return m, tea.Batch(m.collectCmd(), tick(m.interval))
 	}
 	return m, nil
 }
 
-func (m modeloStats) View() string {
-	if m.tiques == 0 && m.erro == nil {
-		return "\n  " + ui.Apagado.Render("coletando…") + "\n"
+func (m statsModel) View() string {
+	if m.ticks == 0 && m.err == nil {
+		return "\n  " + ui.Dim.Render("collecting…") + "\n"
 	}
 
 	var s string
-	s += painelHost(m.hi) + "\n"
+	s += hostPanel(m.hi) + "\n"
 
-	if m.erro != nil {
-		s += ui.Ruim.Render("erro na coleta: "+m.erro.Error()) + "\n\n"
+	if m.err != nil {
+		s += ui.Bad.Render("collection failed: "+m.err.Error()) + "\n\n"
 	}
-	if len(m.amostras) == 0 {
-		s += ui.Aviso("nenhum container em execucao") + "\n"
+	if len(m.samples) == 0 {
+		s += ui.Note("no containers running") + "\n"
 	} else {
-		s += tabelaContainers(m.amostras, m.hi.MemTotal)
+		s += containerTable(m.samples, m.hi.MemTotal)
 	}
 
-	estado := fmt.Sprintf("atualiza a cada %s", m.intervalo)
-	if m.pausado {
-		estado = ui.Atencao.Render("pausado")
+	status := fmt.Sprintf("refreshing every %s", m.interval)
+	if m.paused {
+		status = ui.Warn.Render("paused")
 	}
-	ajuda := ui.Apagado.Render("q sair · p pausar · r atualizar agora") +
-		"  " + ui.Apagado.Render("·") + "  " + ui.Apagado.Render(estado)
+	help := ui.Dim.Render("q quit · p pause · r refresh now") +
+		"  " + ui.Dim.Render("·") + "  " + ui.Dim.Render(status)
 
-	return lipgloss.NewStyle().Padding(1, 2).Render(s + "\n" + ajuda)
+	return lipgloss.NewStyle().Padding(1, 2).Render(s + "\n" + help)
 }
-
-// garante que o pacote cobra continue importado neste arquivo quando a TUI
-// for extraida para outro lugar.
-var _ = cobra.Command{}

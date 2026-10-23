@@ -1,8 +1,9 @@
-// Package spec le e valida o hploy.yaml.
+// Package spec reads and validates hploy.yaml.
 //
-// O spec descreve o estado DESEJADO de um app. Ele nao sabe nada de Docker --
-// quem traduz para container, rede e volume e o pacote plan. Essa separacao e
-// o que permite validar um spec sem daemon nenhum por perto.
+// The spec describes the DESIRED state of an app. It knows nothing about
+// Docker -- translating it into containers, networks and volumes is the plan
+// package's job. That separation is what lets us validate a spec with no
+// daemon anywhere in sight.
 package spec
 
 import (
@@ -13,7 +14,7 @@ import (
 	"strings"
 )
 
-// Spec e um hploy.yaml inteiro.
+// Spec is a whole hploy.yaml.
 type Spec struct {
 	Version  int                 `yaml:"version"`
 	App      string              `yaml:"app"`
@@ -22,113 +23,112 @@ type Spec struct {
 	Services map[string]*Service `yaml:"services"`
 	Volumes  map[string]Volume   `yaml:"volumes"`
 
-	// Origem guarda de qual arquivo o spec veio, para a mensagem de erro
-	// apontar o lugar certo.
-	Origem string `yaml:"-"`
+	// Source records which file the spec came from, so error messages can
+	// point at the right place.
+	Source string `yaml:"-"`
 }
 
-// Service e um container.
+// Service is one container.
 type Service struct {
 	Image     string    `yaml:"image"`
 	Command   []string  `yaml:"command"`
 	Port      int       `yaml:"port"`
 	Health    *Health   `yaml:"health"`
 	Env       Env       `yaml:"env"`
-	Volumes   []string  `yaml:"volumes"` // "nome:/caminho/no/container"
+	Volumes   []string  `yaml:"volumes"` // "name:/path/in/container"
 	Resources Resources `yaml:"resources"`
 
-	// nome e preenchido na leitura; nao vem do arquivo.
-	nome string `yaml:"-"`
+	// name is filled in while loading; it does not come from the file.
+	name string `yaml:"-"`
 }
 
-func (s *Service) Name() string { return s.nome }
+func (s *Service) Name() string { return s.name }
 
-// Volume por enquanto nao tem opcao; existe para o spec declarar quais
-// volumes o app usa, e o plan criar os que faltam.
+// Volume has no options yet; it exists so the spec declares which volumes the
+// app uses and plan can create the missing ones.
 type Volume struct {
-	// reservado para driver/opts no futuro
+	// reserved for driver/opts later
 }
 
-// Env declara QUAIS variaveis o servico precisa -- nunca os valores.
+// Env declares WHICH variables the service needs -- never the values.
 //
-// Valor de segredo em arquivo versionado e questao de tempo para vazar. Os
-// valores vem de ~/.hploy/apps/<app>/env, que nao vai para o git.
+// A secret in a version-controlled file is a leak waiting to happen. Values
+// come from ~/.hploy/apps/<app>/env, which never reaches git.
 type Env struct {
 	Required []string          `yaml:"required"`
 	Optional []string          `yaml:"optional"`
-	Literal  map[string]string `yaml:"literal"` // so para valor nao-secreto
+	Literal  map[string]string `yaml:"literal"` // non-secret values only
 }
 
-// Resources limita o container.
+// Resources caps the container.
 //
-// Numa VPS de 4 GB com dois apps, limite de memoria e a diferenca entre "um
-// app morre" e "a maquina entra em swap e tudo cai junto". Por isso o plan
-// avisa quando falta.
+// On a 4 GB VPS running two apps, a memory limit is the difference between
+// "one app dies" and "the machine starts swapping and everything goes down
+// together". That is why a missing limit is an error, not a warning.
 type Resources struct {
 	Memory Bytes  `yaml:"memory"`
 	CPUs   string `yaml:"cpus"`
 }
 
-var reNome = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$`)
+var reName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$`)
 
-// Load le e valida um hploy.yaml.
-func Load(caminho string) (*Spec, error) {
-	b, err := os.ReadFile(caminho)
+// Load reads and validates an hploy.yaml.
+func Load(path string) (*Spec, error) {
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	s, err := Parse(b)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", caminho, err)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	s.Origem = caminho
+	s.Source = path
 	return s, nil
 }
 
-// Validate junta TODOS os problemas antes de devolver, em vez de parar no
-// primeiro. Quem esta escrevendo o arquivo prefere ver a lista inteira.
+// Validate collects EVERY problem before returning, instead of stopping at
+// the first one. Whoever is writing the file would rather see the whole list.
 func (s *Spec) Validate() error {
-	var problemas []string
-	erro := func(formato string, args ...any) {
-		problemas = append(problemas, fmt.Sprintf(formato, args...))
+	var problems []string
+	fail := func(format string, args ...any) {
+		problems = append(problems, fmt.Sprintf(format, args...))
 	}
 
 	if s.Version != 1 {
-		erro("version deve ser 1 (veio %d)", s.Version)
+		fail("version must be 1 (got %d)", s.Version)
 	}
 	if s.App == "" {
-		erro("app e obrigatorio")
-	} else if !reNome.MatchString(s.App) {
-		erro("app %q invalido: use minusculas, numeros e hifen, comecando e terminando com alfanumerico", s.App)
+		fail("app is required")
+	} else if !reName.MatchString(s.App) {
+		fail("app %q is invalid: use lowercase, digits and hyphen, starting and ending alphanumeric", s.App)
 	}
 	if s.Web == nil && len(s.Services) == 0 {
-		erro("o spec nao declara nenhum servico: falta web ou services")
+		fail("the spec declares no services: web or services is missing")
 	}
 
-	// Valida cada servico, incluindo o web.
-	for _, sv := range s.todos() {
-		prefixo := "servico " + sv.Name()
-		if !reNome.MatchString(sv.Name()) {
-			erro("%s: nome invalido", prefixo)
+	for _, sv := range s.all() {
+		prefix := "service " + sv.Name()
+		if !reName.MatchString(sv.Name()) {
+			fail("%s: invalid name", prefix)
 		}
 		if sv.Image == "" {
-			erro("%s: image e obrigatoria", prefixo)
+			fail("%s: image is required", prefix)
 		}
 		if sv.Resources.Memory == 0 {
-			erro("%s: resources.memory nao definido — sem limite, um app sozinho derruba a maquina", prefixo)
+			fail("%s: resources.memory is not set — with no limit, one app alone can take the machine down", prefix)
 		}
 		for _, v := range sv.Volumes {
-			nome, caminho, ok := strings.Cut(v, ":")
+			name, path, ok := strings.Cut(v, ":")
 			switch {
 			case !ok:
-				erro("%s: volume %q deve ser \"nome:/caminho\"", prefixo, v)
-			case !strings.HasPrefix(caminho, "/"):
-				erro("%s: volume %q: o caminho tem de ser absoluto", prefixo, v)
-			case !reNome.MatchString(nome):
-				erro("%s: volume %q: nome invalido", prefixo, nome)
+				fail("%s: volume %q must be \"name:/path\"", prefix, v)
+			case !strings.HasPrefix(path, "/"):
+				fail("%s: volume %q: the path must be absolute", prefix, v)
+			case !reName.MatchString(name):
+				fail("%s: volume %q: invalid name", prefix, name)
 			default:
-				if _, declarado := s.Volumes[nome]; !declarado {
-					erro("%s: volume %q usado mas nao declarado no bloco volumes", prefixo, nome)
+				if _, declared := s.Volumes[name]; !declared {
+					fail("%s: volume %q is used but not declared in the volumes block", prefix, name)
 				}
 			}
 		}
@@ -136,54 +136,55 @@ func (s *Spec) Validate() error {
 
 	if s.Web != nil {
 		if s.Web.Port == 0 {
-			erro("web: port e obrigatoria — e por ela que o proxy encontra o app")
+			fail("web: port is required — it is how the proxy finds the app")
 		}
 		if len(s.Domains) == 0 {
-			erro("domains e obrigatorio quando ha um servico web")
+			fail("domains is required when there is a web service")
 		}
 	} else if len(s.Domains) > 0 {
-		erro("domains declarado mas nao ha servico web para atender")
+		fail("domains is declared but there is no web service to serve them")
 	}
 
-	// Serviço de apoio com porta e o erro que expoe banco para a internet.
-	for nome, sv := range s.Services {
+	// A support service with a port is the mistake that exposes a database to
+	// the internet.
+	for name, sv := range s.Services {
 		if sv.Port != 0 {
-			erro("services.%s: port nao e permitida em servico de apoio — use a rede interna", nome)
+			fail("services.%s: port is not allowed on a support service — use the internal network", name)
 		}
 	}
 
-	if len(problemas) > 0 {
-		sort.Strings(problemas)
-		return fmt.Errorf("spec invalido:\n  - %s", strings.Join(problemas, "\n  - "))
+	if len(problems) > 0 {
+		sort.Strings(problems)
+		return fmt.Errorf("invalid spec:\n  - %s", strings.Join(problems, "\n  - "))
 	}
 	return nil
 }
 
-// todos devolve web + services, em ordem estavel.
-func (s *Spec) todos() []*Service {
+// all returns web + services in a stable order.
+func (s *Spec) all() []*Service {
 	var out []*Service
 	if s.Web != nil {
 		out = append(out, s.Web)
 	}
-	nomes := make([]string, 0, len(s.Services))
+	names := make([]string, 0, len(s.Services))
 	for n := range s.Services {
-		nomes = append(nomes, n)
+		names = append(names, n)
 	}
-	sort.Strings(nomes)
-	for _, n := range nomes {
+	sort.Strings(names)
+	for _, n := range names {
 		out = append(out, s.Services[n])
 	}
 	return out
 }
 
-// Services ordenados, com o web por ultimo.
+// StartOrder returns the services with web last.
 //
-// A ordem importa no apply: o banco tem de estar de pe antes do web, senao a
-// aplicacao sobe sem conseguir conectar.
-func (s *Spec) EmOrdemDeSubida() []*Service {
-	todos := s.todos()
-	out := make([]*Service, 0, len(todos))
-	for _, sv := range todos {
+// Order matters on apply: the database has to be up before web, otherwise the
+// application starts unable to connect.
+func (s *Spec) StartOrder() []*Service {
+	all := s.all()
+	out := make([]*Service, 0, len(all))
+	for _, sv := range all {
 		if sv != s.Web {
 			out = append(out, sv)
 		}
@@ -194,7 +195,7 @@ func (s *Spec) EmOrdemDeSubida() []*Service {
 	return out
 }
 
-// EnvNames devolve todas as variaveis que o servico espera.
+// EnvNames lists every variable the service expects.
 func (sv *Service) EnvNames() []string {
 	out := append([]string{}, sv.Env.Required...)
 	out = append(out, sv.Env.Optional...)

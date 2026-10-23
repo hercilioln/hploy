@@ -1,7 +1,30 @@
+# Build output.
+#
+# The leading slash anchors the pattern to the repository ROOT. Without it,
+# "hploy" would match any file or directory with that name at any depth --
+# including cmd/hploy/, which is exactly what dropped main.go from the first
+# commit.
 /bin/
 /dist/
-hploy
+/hploy
+
+# Tests and coverage.
 *.test
 *.out
+coverage.*
+
+# hploy's local state. The real one lives in ~/.hploy, outside the repo, but a
+# test could produce this here.
+.hploy/
+
+# Secrets never enter the repository: the spec declares variable NAMES, the
+# values live in ~/.hploy/apps/<app>/env.
+.env
+*.env
+!*.env.example
+
+# Editors.
 .idea/
 .vscode/
+*.swp
+.DS_Store

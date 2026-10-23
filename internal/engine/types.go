@@ -1,8 +1,8 @@
-// Package engine fala com o daemon do Docker.
+// Package engine talks to the Docker daemon.
 //
-// Os tipos daqui sao NOSSOS, nao os do Docker. O resto do programa depende
-// deles, e nao do formato que a API devolve -- assim trocar a fonte (ou a
-// versao da API) nao espalha mudanca pelo codigo todo.
+// The types here are OURS, not Docker's. The rest of the program depends on
+// these, not on whatever shape the API returns -- so swapping the source (or
+// the API version) does not ripple through the whole codebase.
 package engine
 
 import (
@@ -11,23 +11,23 @@ import (
 	"time"
 )
 
-// Container e o que o `hploy ps` mostra.
+// Container is what `hploy ps` shows.
 type Container struct {
 	ID        string
 	Name      string
 	Image     string
 	State     string // running, exited, created, paused...
-	Status    string // "Up 2 hours (healthy)" -- texto do proprio Docker
-	Health    string // healthy, unhealthy, starting, "" quando nao ha healthcheck
-	App       string // label hploy.app, vazio para container que nao e nosso
+	Status    string // "Up 2 hours (healthy)" -- Docker's own wording
+	Health    string // healthy, unhealthy, starting, "" when there is no healthcheck
+	App       string // hploy.app label, empty for containers that are not ours
 	CreatedAt time.Time
 	Ports     []string
 }
 
-// Managed diz se o container foi criado pelo hploy.
+// Managed reports whether hploy created this container.
 func (c Container) Managed() bool { return c.App != "" }
 
-// Sample e uma leitura instantanea de consumo de um container.
+// Sample is one instantaneous resource reading for a container.
 type Sample struct {
 	ID       string
 	Name     string
@@ -39,13 +39,12 @@ type Sample struct {
 	BlkRead  uint64
 	BlkWrite uint64
 
-	// HasCPU e falso no primeiro quadro do stream: sem leitura anterior nao
-	// da para calcular o delta de CPU. A tela mostra "—" nesse caso.
+	// HasCPU is false on the first frame of the stream: without a previous
+	// reading there is no delta to compute. The view shows "—" in that case.
 	HasCPU bool
 }
 
-// MemPerc devolve o uso de memoria em relacao ao limite, ou 0 se nao houver
-// limite definido.
+// MemPerc returns memory usage against the limit, or 0 when unlimited.
 func (s Sample) MemPerc() float64 {
 	if s.MemLimit == 0 {
 		return 0
@@ -53,15 +52,15 @@ func (s Sample) MemPerc() float64 {
 	return float64(s.MemUsage) / float64(s.MemLimit) * 100
 }
 
-// LogOptions controla o que o `hploy logs` pede ao daemon.
+// LogOptions controls what `hploy logs` asks the daemon for.
 type LogOptions struct {
 	Follow     bool
-	Tail       string // numero ou "all"
+	Tail       string // a number, or "all"
 	Timestamps bool
 }
 
-// Engine e a fronteira com o Docker. E uma interface para que o resto do
-// programa (e os testes) nao precise de um daemon de verdade.
+// Engine is the boundary with Docker. It is an interface so the rest of the
+// program (and the tests) does not need a real daemon.
 type Engine interface {
 	Ping(ctx context.Context) (string, error)
 	List(ctx context.Context, all bool) ([]Container, error)

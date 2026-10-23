@@ -13,10 +13,10 @@ func cmdLogs() *cobra.Command {
 	var opt engine.LogOptions
 	cmd := &cobra.Command{
 		Use:   "logs <container>",
-		Short: "Mostra o log de um container",
+		Short: "Show a container's log",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := motor(cmd.Context())
+			c, err := dockerEngine(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -26,8 +26,8 @@ func cmdLogs() *cobra.Command {
 			}
 			defer r.Close()
 
-			// Saida crua, sem cor e sem tabela: log existe para passar por
-			// grep, less e redirecionamento.
+			// Raw output, no color and no table: logs exist to be piped into
+			// grep, less and redirection.
 			_, err = io.Copy(os.Stdout, r)
 			switch {
 			case err == nil, errors.Is(err, io.EOF):
@@ -39,8 +39,8 @@ func cmdLogs() *cobra.Command {
 			}
 		},
 	}
-	cmd.Flags().BoolVarP(&opt.Follow, "follow", "f", false, "acompanha novas linhas")
-	cmd.Flags().StringVarP(&opt.Tail, "tail", "n", "100", "quantas linhas finais mostrar (ou \"all\")")
-	cmd.Flags().BoolVarP(&opt.Timestamps, "timestamps", "t", false, "prefixa cada linha com o horario")
+	cmd.Flags().BoolVarP(&opt.Follow, "follow", "f", false, "keep streaming new lines")
+	cmd.Flags().StringVarP(&opt.Tail, "tail", "n", "100", "how many trailing lines to show (or \"all\")")
+	cmd.Flags().BoolVarP(&opt.Timestamps, "timestamps", "t", false, "prefix each line with its time")
 	return cmd
 }
