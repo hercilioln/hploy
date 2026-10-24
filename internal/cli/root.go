@@ -42,7 +42,7 @@ func root() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&socketFlag, "socket", engine.DefaultSocket,
 		"path to the Docker socket")
 
-	cmd.AddCommand(cmdPs(), cmdStats(), cmdLogs(), cmdApps(), cmdPlan(), cmdApply(), cmdBuild(), cmdStop(), cmdDown(), cmdVersion())
+	cmd.AddCommand(cmdPs(), cmdStats(), cmdLogs(), cmdApps(), cmdAdd(), cmdEnv(), cmdEdit(), cmdPlan(), cmdApply(), cmdBuild(), cmdStop(), cmdDown(), cmdRemove(), cmdVersion())
 	return cmd
 }
 

@@ -1,11 +1,9 @@
 package cli
 
 import (
-	"bufio"
+	"errors"
 	"fmt"
-	"io"
 	"os"
-	"strings"
 
 	"github.com/hercilioln/hploy/internal/plan"
 	"github.com/hercilioln/hploy/internal/ui"
@@ -14,7 +12,7 @@ import (
 
 func cmdApply() *cobra.Command {
 	var file string
-	var assumeYes, quiet bool
+	var assumeYes, verbose bool
 
 	cmd := &cobra.Command{
 		Use:   "apply [app]",
@@ -56,11 +54,9 @@ func cmdApply() *cobra.Command {
 			}
 
 			fmt.Println()
-			err = plan.Execute(cmd.Context(), eng, t, p, plan.Output{
-				Step: stepPrinter(),
-				Logs: buildLogWriter(quiet),
-			})
-			if err != nil {
+			out, logs := output(ui.NewConsole(os.Stdout), verbose)
+			if err := plan.Execute(cmd.Context(), eng, t, p, out); err != nil {
+				logs.dump()
 				return err
 			}
 			fmt.Println()
@@ -70,71 +66,46 @@ func cmdApply() *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&file, "file", "f", defaultSpecFile, "path to the spec")
 	cmd.Flags().BoolVarP(&assumeYes, "yes", "y", false, "skip the confirmation")
-	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "hide the build output")
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show the full build output")
 	return cmd
 }
 
-// stepPrinter is the one-line-per-action reporter shared by apply and build.
-func stepPrinter() plan.Progress {
-	return func(verb plan.Verb, kind plan.Kind, name, note string) {
-		line := fmt.Sprintf("  %s %s %s", verbMark(verb), ui.Dim.Render(string(kind)), name)
-		if note != "" {
-			line += "  " + ui.Dim.Render(note)
-		}
-		fmt.Println(line)
-	}
-}
-
-// buildLogWriter indents the daemon's output so it reads as a nested detail
-// rather than competing with hploy's own lines.
-func buildLogWriter(quiet bool) io.Writer {
-	if quiet {
-		return nil
-	}
-	return &indenter{w: os.Stdout, prefix: "      "}
-}
-
-type indenter struct {
-	w       io.Writer
-	prefix  string
-	midLine bool
-}
-
-func (i *indenter) Write(p []byte) (int, error) {
-	for _, line := range strings.SplitAfter(string(p), "\n") {
-		if line == "" {
-			continue
-		}
-		text, complete := strings.CutSuffix(line, "\n")
-
-		// The daemon sends a bare "\n" as its own frame; styling an empty
-		// string would emit colour codes around nothing.
-		if text != "" {
-			if !i.midLine {
-				io.WriteString(i.w, i.prefix)
+// output wires the three things that share the terminal: hploy's own step
+// lines, the daemon's log stream and the spinner.
+func output(console *ui.Console, verbose bool) (plan.Output, *buildLog) {
+	logs := newBuildLog(console, verbose)
+	return plan.Output{
+		Step: func(verb plan.Verb, kind plan.Kind, name, note string) {
+			line := fmt.Sprintf("  %s %s %s", verbMark(verb), ui.Dim.Render(string(kind)), name)
+			if note != "" {
+				line += "  " + ui.Dim.Render(note)
 			}
-			io.WriteString(i.w, ui.Dim.Render(text))
-		}
-		if complete {
-			io.WriteString(i.w, "\n")
-		}
-		i.midLine = !complete
-	}
-	return len(p), nil
+			console.Printf("%s", line)
+		},
+		Busy: console.Busy,
+		Logs: logs,
+	}, logs
 }
 
 func confirm() (bool, error) {
-	return confirmWith("\napply these changes? [y/N] ")
+	return confirmWith("apply these changes?")
 }
 
-func confirmWith(prompt string) (bool, error) {
-	fmt.Print(prompt)
-	answer, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil {
-		// No stdin (a pipe, or cron): treat silence as no. An apply must never
-		// happen because nobody was there to say no.
+func confirmWith(question string) (bool, error) {
+	// No terminal (a pipe, or cron): silence is a no. An apply must never
+	// happen because nobody was there to say no -- but it has to say that is
+	// the reason, or a piped run looks like it was answered.
+	if !isTTY() {
+		fmt.Println()
+		fmt.Println(ui.Note("not a terminal, so there is nobody to ask — pass --yes to go ahead"))
 		return false, nil
 	}
-	answer = strings.ToLower(strings.TrimSpace(answer))
-	return answer == "y" || answer == "yes", nil
+	fmt.Println()
+	choice, err := ui.Select(ui.Choice{
+		Label: question, Options: []string{"yes", "no"}, Default: 1,
+	})
+	if errors.Is(err, ui.ErrCancelled) {
+		return false, nil
+	}
+	return choice == 0, err
 }

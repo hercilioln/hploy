@@ -8,13 +8,19 @@ import (
 	"strings"
 )
 
-// Hash fingerprints a service's configuration. Stored as a container label,
-// it lets apply tell "unchanged" from "needs recreating" without diffing
-// against the values Docker normalizes.
+// Hash fingerprints a service's configuration, including the environment it
+// will be handed. Stored as a container label, it lets apply tell "unchanged"
+// from "needs recreating" without diffing against the values Docker
+// normalizes.
 //
-// Resolved env values are excluded: rotating a secret should not recreate the
-// container, and no secret belongs in a label.
-func (sv *Service) Hash(app string) string {
+// The values are in the hash because a container's environment is fixed when
+// it is created. A value that changed without recreating the container is a
+// value that never took effect -- so excluding them, as this once did, made
+// rotating a password a silent no-op.
+//
+// Only the digest reaches the label, and it covers the whole configuration at
+// once, so no value can be read back out of it.
+func (sv *Service) Hash(app string, env map[string]string) string {
 	h := sha256.New()
 
 	write := func(format string, args ...any) {
@@ -50,6 +56,19 @@ func (sv *Service) Hash(app string) string {
 	required := append([]string{}, sv.Env.Required...)
 	sort.Strings(required)
 	write("required=%s", strings.Join(required, "\x1f"))
+
+	// from_file on its own as well as the result: flipping it with an empty
+	// env file changes nothing injected, but it is still a config change.
+	write("from_file=%t", sv.Env.FromFile)
+
+	envKeys := make([]string, 0, len(env))
+	for k := range env {
+		envKeys = append(envKeys, k)
+	}
+	sort.Strings(envKeys)
+	for _, k := range envKeys {
+		write("env=%s=%s", k, env[k])
+	}
 
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }

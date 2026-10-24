@@ -12,6 +12,11 @@ import (
 // Values never live here. Vars carries templates resolved against the app's
 // env file, so a password exists in one place only.
 type Env struct {
+	// FromFile injects every key of the application's own env file. This is
+	// the usual shape for an application container, which wants its whole
+	// configuration; a database gets named vars instead.
+	FromFile bool `yaml:"from_file"`
+
 	// Required keys must exist in the app env. Useful for variables the
 	// application reads itself and hploy never injects, like APP_KEY.
 	Required []string `yaml:"required"`
@@ -25,12 +30,22 @@ type Env struct {
 // password stays a dollar sign.
 var reVar = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-// Resolve turns Vars into the values to inject.
+// Resolve turns the declaration into the values to inject.
+//
+// lookup is what ${NAME} reads: the application's env file plus hploy's own
+// store. fileEnv is only the application's file, and is the only thing
+// FromFile injects -- the store may hold hploy's secrets, such as a webhook
+// or registry password, which have no business inside the app container.
 //
 // An unknown reference is an error, not an empty string: silently substituting
 // nothing produces a container with a blank password and no warning.
-func (e Env) Resolve(appEnv map[string]string) (map[string]string, error) {
-	out := make(map[string]string, len(e.Vars))
+func (e Env) Resolve(lookup, fileEnv map[string]string) (map[string]string, error) {
+	out := make(map[string]string, len(e.Vars)+len(fileEnv))
+	if e.FromFile {
+		for k, v := range fileEnv {
+			out[k] = v
+		}
+	}
 	var missing []string
 
 	keys := make([]string, 0, len(e.Vars))
@@ -40,9 +55,10 @@ func (e Env) Resolve(appEnv map[string]string) (map[string]string, error) {
 	sort.Strings(keys)
 
 	for _, k := range keys {
+		// Vars are applied last, so an explicit declaration beats the file.
 		value := reVar.ReplaceAllStringFunc(e.Vars[k], func(match string) string {
 			name := reVar.FindStringSubmatch(match)[1]
-			v, ok := appEnv[name]
+			v, ok := lookup[name]
 			if !ok {
 				missing = append(missing, name)
 				return ""

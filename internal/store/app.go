@@ -151,3 +151,47 @@ func CleanDomain(d string) (string, error) {
 	}
 	return clean, nil
 }
+
+// FindByPath returns the app registered at this exact directory, or nil.
+//
+// It is how a bare `hploy plan` works inside a registered clone: the spec may
+// live in the store rather than in the repo, so the directory alone has to be
+// enough to identify the app.
+func FindByPath(dir string) (*App, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+
+	apps, err := ListApps()
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range apps {
+		candidate := a.Path
+		if resolved, err := filepath.EvalSymlinks(candidate); err == nil {
+			candidate = resolved
+		}
+		if candidate == abs {
+			return a, nil
+		}
+	}
+	return nil, nil
+}
+
+// Names lists the registered app names, for an error message that can say
+// what the alternatives are.
+func Names() []string {
+	apps, err := ListApps()
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(apps))
+	for _, a := range apps {
+		out = append(out, a.Name)
+	}
+	return out
+}

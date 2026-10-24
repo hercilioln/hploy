@@ -41,7 +41,17 @@ func Parse(b []byte) (*Spec, error) {
 	return &s, nil
 }
 
+// MinMemory is the floor Docker enforces: below it, container create fails
+// with "Minimum memory limit allowed is 6MB" -- after the image was built and
+// the network and volumes were created, which is the worst possible moment to
+// find out.
+const MinMemory Bytes = 6 << 20
+
 // Bytes accepts "512m", "2g", "268435456".
+//
+// A bare number is bytes, as it is for Docker itself. That makes "256" mean
+// 256 bytes, which is never what someone means, so Validate rejects anything
+// under MinMemory and says so.
 type Bytes uint64
 
 func (b *Bytes) UnmarshalYAML(n *yaml.Node) error {
@@ -94,11 +104,18 @@ func (b Bytes) String() string {
 	}
 }
 
-// Health accepts two shapes:
+// Health accepts three shapes:
 //
-//	health: /up                                -> HTTP GET
+//	health: tcp                                -> the port accepts a connection
+//	health: /up                                -> HTTP GET on the port
 //	health: { cmd: ["pg_isready", "-U", "x"] } -> command in the container
+//
+// tcp is the one that cannot be wrong about the protocol: a port that accepts
+// a connection is up whether it then speaks HTTP, FastCGI or Postgres. A path
+// says more when the port really is HTTP, and a command is the only option
+// for a container with nothing listening at all.
 type Health struct {
+	TCP      bool          `yaml:"tcp"`
 	Path     string        `yaml:"path"`
 	Cmd      []string      `yaml:"cmd"`
 	Interval time.Duration `yaml:"interval"`
@@ -107,16 +124,20 @@ type Health struct {
 }
 
 func (h *Health) UnmarshalYAML(n *yaml.Node) error {
-	// Shorthand: health: /up
+	// Shorthands: health: tcp and health: /up
 	if n.Kind == yaml.ScalarNode {
-		var path string
-		if err := n.Decode(&path); err != nil {
+		var text string
+		if err := n.Decode(&text); err != nil {
 			return err
 		}
-		if !strings.HasPrefix(path, "/") {
-			return fmt.Errorf("health %q: the shorthand must be a path starting with /", path)
+		switch {
+		case text == "tcp":
+			h.TCP = true
+		case strings.HasPrefix(text, "/"):
+			h.Path = text
+		default:
+			return fmt.Errorf("health %q: the shorthand is either tcp or a path starting with /", text)
 		}
-		h.Path = path
 		h.applyDefaults()
 		return nil
 	}
@@ -128,11 +149,18 @@ func (h *Health) UnmarshalYAML(n *yaml.Node) error {
 		return err
 	}
 	*h = Health(r)
-	if h.Path == "" && len(h.Cmd) == 0 {
-		return fmt.Errorf("health: set either path or cmd")
+
+	set := 0
+	for _, on := range []bool{h.TCP, h.Path != "", len(h.Cmd) > 0} {
+		if on {
+			set++
+		}
 	}
-	if h.Path != "" && len(h.Cmd) > 0 {
-		return fmt.Errorf("health: path and cmd are mutually exclusive")
+	if set == 0 {
+		return fmt.Errorf("health: set one of tcp, path or cmd")
+	}
+	if set > 1 {
+		return fmt.Errorf("health: tcp, path and cmd are mutually exclusive")
 	}
 	h.applyDefaults()
 	return nil
@@ -151,11 +179,14 @@ func (h *Health) applyDefaults() {
 }
 
 func (h *Health) String() string {
-	if h == nil {
+	switch {
+	case h == nil:
 		return "none"
-	}
-	if h.Path != "" {
+	case h.TCP:
+		return "a connection on the port"
+	case h.Path != "":
 		return "GET " + h.Path
+	default:
+		return strings.Join(h.Cmd, " ")
 	}
-	return strings.Join(h.Cmd, " ")
 }

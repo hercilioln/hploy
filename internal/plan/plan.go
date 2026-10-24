@@ -40,7 +40,11 @@ type Action struct {
 // the repository and the deployment config from the store.
 type Target struct {
 	Spec *spec.Spec
-	Env  map[string]string
+
+	// Env is the ${NAME} lookup; FileEnv is the application's own env file,
+	// which is all that env.from_file injects. See store.AppEnv.
+	Env     map[string]string
+	FileEnv map[string]string
 
 	// Dir is the spec's directory: build contexts resolve against it.
 	Dir     string
@@ -52,6 +56,19 @@ type Target struct {
 }
 
 func (t *Target) App() string { return t.Spec.App }
+
+// Hash fingerprints a service in this target, including the names the env
+// file would inject.
+func (t *Target) Hash(sv *spec.Service) string {
+	// A reference that does not resolve is reported as a problem and blocks
+	// apply, so the hash of that state is never written to a container. It
+	// still must not collide with the resolved one.
+	env, err := sv.Env.Resolve(t.Env, t.FileEnv)
+	if err != nil {
+		return sv.Hash(t.Spec.App, nil)
+	}
+	return sv.Hash(t.Spec.App, env)
+}
 
 type Plan struct {
 	App     string
@@ -127,8 +144,8 @@ func Build(ctx context.Context, eng engine.Engine, t *Target) (*Plan, error) {
 	p.planNetwork(sp, networks)
 	p.planVolumes(sp, volumes)
 	p.planImages(sp, images)
-	p.planContainers(sp, containers, images)
-	p.checkEnv(sp, t.Env)
+	p.planContainers(t, containers, images)
+	p.checkEnv(sp, t.Env, t.FileEnv)
 	p.checkRouting(t)
 	return p, nil
 }
@@ -213,7 +230,9 @@ func (p *Plan) planImages(sp *spec.Spec, images map[string]string) {
 	}
 }
 
-func (p *Plan) planContainers(sp *spec.Spec, existing []engine.Container, images map[string]string) {
+func (p *Plan) planContainers(t *Target, existing []engine.Container, images map[string]string) {
+	sp := t.Spec
+
 	// Only containers carrying our label are considered. Anything else on the
 	// machine is invisible to hploy.
 	ours := map[string]engine.Container{}
@@ -225,7 +244,7 @@ func (p *Plan) planContainers(sp *spec.Spec, existing []engine.Container, images
 
 	for _, sv := range sp.StartOrder() {
 		name := ContainerName(sp.App, sv.Name())
-		want := sv.Hash(sp.App)
+		want := t.Hash(sv)
 		current, exists := ours[sv.Name()]
 		delete(ours, sv.Name())
 
@@ -271,7 +290,7 @@ func (p *Plan) checkRouting(t *Target) {
 	}
 }
 
-func (p *Plan) checkEnv(sp *spec.Spec, env map[string]string) {
+func (p *Plan) checkEnv(sp *spec.Spec, env, fileEnv map[string]string) {
 	seen := map[string]bool{}
 	var missing []string
 	for _, sv := range sp.StartOrder() {
@@ -286,5 +305,17 @@ func (p *Plan) checkEnv(sp *spec.Spec, env map[string]string) {
 	for _, key := range missing {
 		p.Problems = append(p.Problems,
 			fmt.Sprintf("%s is referenced by the spec but not set in %s", key, sp.EnvFileOrDefault()))
+	}
+
+	// A service asking for the whole file and getting nothing is almost
+	// always an env file that was never filled in. It is not a Problem --
+	// hploy cannot know which variables an application truly needs -- but
+	// silence here means a crash loop that plan said nothing about.
+	for _, sv := range sp.StartOrder() {
+		if sv.Env.FromFile && len(fileEnv) == 0 {
+			p.Warnings = append(p.Warnings, fmt.Sprintf(
+				"%s injects the whole %s, which has no variables — run `hploy env`",
+				sv.Name(), sp.EnvFileOrDefault()))
+		}
 	}
 }

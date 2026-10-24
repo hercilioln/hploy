@@ -2,13 +2,16 @@ package plan
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/hercilioln/hploy/internal/buildctx"
@@ -36,6 +39,11 @@ type Writer interface {
 type Output struct {
 	Step Progress
 	Logs io.Writer // nil discards the build output
+
+	// Busy announces a slow step and returns the function that ends it.
+	// Pulling a base image and waiting for a healthcheck produce no output
+	// of their own, and silence reads as a hang.
+	Busy func(label string) func()
 }
 
 func (o Output) step(verb Verb, kind Kind, name, note string) {
@@ -49,6 +57,13 @@ func (o Output) logs() io.Writer {
 		return io.Discard
 	}
 	return o.Logs
+}
+
+func (o Output) busy(format string, args ...any) func() {
+	if o.Busy == nil {
+		return func() {}
+	}
+	return o.Busy(fmt.Sprintf(format, args...))
 }
 
 // Progress reports each step as it happens, so a slow apply is not a silent
@@ -106,7 +121,8 @@ func Execute(ctx context.Context, w Writer, t *Target, p *Plan, out Output) erro
 func applyImage(ctx context.Context, w Writer, t *Target, a Action, out Output) error {
 	sv := serviceByImage(t.Spec, a.Name)
 	if sv == nil || sv.Build == nil {
-		out.step(a.Verb, a.Kind, a.Name, "pulling")
+		out.step(a.Verb, a.Kind, a.Name, "")
+		defer out.busy("pulling %s", a.Name)()
 		return w.PullImage(ctx, a.Name)
 	}
 	return BuildService(ctx, w, t, sv, engine.BuildOptions{}, out)
@@ -140,7 +156,9 @@ func BuildService(ctx context.Context, w Writer, t *Target, sv *spec.Service, op
 	out.step(Create, KindImage, sv.Image,
 		fmt.Sprintf("context %s: %d files, %s", sv.Build.ContextOrDefault(), st.Files, humanBytes(st.Bytes)))
 
+	stopBusy := out.busy("building %s", sv.Image)
 	id, err := w.Build(ctx, dir, opt, out.logs())
+	stopBusy()
 	if err != nil {
 		return err
 	}
@@ -156,7 +174,7 @@ func resolveArgs(args, env map[string]string) (map[string]string, error) {
 	if len(args) == 0 {
 		return nil, nil
 	}
-	return spec.Env{Vars: args}.Resolve(env)
+	return spec.Env{Vars: args}.Resolve(env, nil)
 }
 
 func humanBytes(n int64) string {
@@ -229,8 +247,10 @@ func applyContainer(ctx context.Context, w Writer, t *Target, a Action, out Outp
 				return err
 			}
 		} else {
-			out.step(a.Verb, a.Kind, a.Name, "pulling "+sv.Image)
-			if err := w.PullImage(ctx, sv.Image); err != nil {
+			stopBusy := out.busy("pulling %s", sv.Image)
+			err := w.PullImage(ctx, sv.Image)
+			stopBusy()
+			if err != nil {
 				return err
 			}
 		}
@@ -252,7 +272,7 @@ func applyContainer(ctx context.Context, w Writer, t *Target, a Action, out Outp
 
 func containerSpec(t *Target, sv *spec.Service) (engine.ContainerSpec, error) {
 	sp := t.Spec
-	resolved, err := sv.Env.Resolve(t.Env)
+	resolved, err := sv.Env.Resolve(t.Env, t.FileEnv)
 	if err != nil {
 		return engine.ContainerSpec{}, err
 	}
@@ -277,7 +297,7 @@ func containerSpec(t *Target, sv *spec.Service) (engine.ContainerSpec, error) {
 		Labels: map[string]string{
 			engine.LabelApp:      sp.App,
 			engine.LabelService:  sv.Name(),
-			engine.LabelSpecHash: sv.Hash(sp.App),
+			engine.LabelSpecHash: t.Hash(sv),
 		},
 	}
 
@@ -313,25 +333,37 @@ func waitHealthy(ctx context.Context, w Writer, sp *spec.Spec, sv *spec.Service,
 		deadline = time.Now().Add(10 * time.Second)
 	}
 
-	out.step(Unchanged, KindContainer, name, "waiting for "+sv.Health.String())
+	defer out.busy("%s: waiting for %s", name, sv.Health.String())()
+
+	// Why the last attempt failed. It is kept rather than returned, because
+	// a refused connection one second after start is not a failure, it is a
+	// container still booting -- but at the deadline it is the only thing
+	// that explains anything.
+	var reason error
+
 	for {
 		insp, err := w.Inspect(ctx, name)
 		if err != nil {
 			return err
 		}
 		if insp.State != "running" {
-			return fmt.Errorf("stopped while starting (state %s)", insp.State)
+			return fmt.Errorf("stopped while starting (state %s)%s",
+				insp.State, containerTail(ctx, w, name))
 		}
 
 		ok, err := probe(ctx, sv, insp)
-		if err == nil && ok {
+		if ok {
 			return nil
 		}
+		if err != nil {
+			reason = err
+		}
 		if time.Now().After(deadline) {
-			if err != nil {
-				return fmt.Errorf("never became healthy: %w", err)
+			if reason != nil {
+				return fmt.Errorf("never became healthy: %w%s%s", reason,
+					probeHint(reason, sv), containerTail(ctx, w, name))
 			}
-			return fmt.Errorf("never became healthy")
+			return fmt.Errorf("never became healthy%s", containerTail(ctx, w, name))
 		}
 		select {
 		case <-time.After(time.Second):
@@ -339,6 +371,43 @@ func waitHealthy(ctx context.Context, w Writer, sp *spec.Spec, sv *spec.Service,
 			return ctx.Err()
 		}
 	}
+}
+
+// logReader is all containerTail needs. Asking for less than Writer keeps
+// the failure path from depending on the write half of the engine.
+type logReader interface {
+	Logs(ctx context.Context, id string, opt engine.LogOptions) (io.ReadCloser, error)
+}
+
+// containerTail attaches the container's own output to a failure. Without it
+// "never became healthy" says nothing about why, and the logs are gone as
+// soon as someone runs down.
+func containerTail(ctx context.Context, w logReader, name string) string {
+	rc, err := w.Logs(ctx, name, engine.LogOptions{Tail: "20"})
+	if err != nil {
+		return ""
+	}
+	defer rc.Close()
+
+	raw, err := io.ReadAll(io.LimitReader(rc, 64<<10))
+	if err != nil && len(raw) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	shown := 0
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "\n      %s", line)
+		shown++
+	}
+	// strings.Split never returns an empty slice, so counting what was
+	// actually printed is the only way to know the log was silent.
+	if shown == 0 {
+		return fmt.Sprintf("\n\n  %s printed nothing at all", name)
+	}
+	return fmt.Sprintf("\n\n  last lines of %s:%s", name, b.String())
 }
 
 func probe(ctx context.Context, sv *spec.Service, insp engine.Inspected) (bool, error) {
@@ -357,14 +426,31 @@ func probe(ctx context.Context, sv *spec.Service, insp engine.Inspected) (bool, 
 	if insp.IP == "" {
 		return false, nil
 	}
-	url := fmt.Sprintf("http://%s%s", net.JoinHostPort(insp.IP, strconv.Itoa(sv.Port)), sv.Health.Path)
+	addr := net.JoinHostPort(insp.IP, strconv.Itoa(sv.Port))
+
+	// A connection is the one answer no protocol can get wrong: the port is
+	// either accepting or it is not.
+	if sv.Health.TCP {
+		conn, err := net.DialTimeout("tcp", addr, sv.Health.Timeout)
+		if err != nil {
+			return false, fmt.Errorf("connecting to port %d: %w", sv.Port, unwrapURL(err))
+		}
+		conn.Close()
+		return true, nil
+	}
+
+	url := fmt.Sprintf("http://%s%s", addr, sv.Health.Path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return false, err
 	}
 	resp, err := (&http.Client{Timeout: sv.Health.Timeout}).Do(req)
 	if err != nil {
-		return false, nil // not up yet
+		// Not up yet, most likely. The reason is still worth carrying: a
+		// port that never answers and a port that answers with something
+		// other than HTTP are different problems, and "never became
+		// healthy" on its own tells neither of them apart.
+		return false, fmt.Errorf("GET %s on port %d: %w", sv.Health.Path, sv.Port, unwrapURL(err))
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
@@ -372,6 +458,76 @@ func probe(ctx context.Context, sv *spec.Service, insp engine.Inspected) (bool, 
 		return true, nil
 	}
 	return false, fmt.Errorf("%s returned %d", sv.Health.Path, resp.StatusCode)
+}
+
+// unwrapURL drops the *url.Error wrapper, whose "Get \"http://...\":" prefix
+// repeats what the message already said.
+func unwrapURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
+}
+
+// probeHint turns the two failures that are not "it is still booting" into
+// something actionable.
+//
+// The second one is the trap: an HTTP probe assumes the port speaks HTTP, and
+// plenty of application containers listen with something else -- FastCGI on
+// 9000 being the common one. The container's own log then says it is ready,
+// which reads like hploy is wrong.
+func probeHint(err error, sv *spec.Service) string {
+	// waitHealthy returns before this when there is no check, but a nil
+	// dereference on the failure path would turn a failed deploy into a
+	// crash, which is a worse bug than a missing hint.
+	if sv.Health == nil {
+		return ""
+	}
+
+	// Two spaces of base indent, like the rest of a command's output. A
+	// blank line stays blank rather than carrying trailing spaces.
+	block := func(lines ...string) string {
+		var b strings.Builder
+		b.WriteString("\n")
+		for _, line := range lines {
+			if line == "" {
+				b.WriteString("\n")
+				continue
+			}
+			b.WriteString("\n  " + line)
+		}
+		return b.String()
+	}
+
+	switch {
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return block(
+			fmt.Sprintf("nothing is listening on port %d inside the container.", sv.Port),
+			"check the port in the spec against what the process actually binds.")
+
+	// Something accepted the connection and then would not talk HTTP. A
+	// reset is what php-fpm does; the malformed-response cases are matched
+	// on the message because net/http gives them no type, so a future
+	// wording change costs the hint, not the error.
+	// Only the HTTP probe can be wrong about the protocol; a tcp one accepts
+	// whatever answers.
+	case sv.Health.Path != "" && (errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		strings.Contains(err.Error(), "malformed HTTP response") ||
+		strings.Contains(err.Error(), "invalid HTTP") ||
+		strings.Contains(err.Error(), "EOF")):
+		return block(
+			fmt.Sprintf("port %d answered, but not in HTTP.", sv.Port),
+			"a FastCGI port (php-fpm) or any other protocol cannot be probed with",
+			"a path. ask for a connection instead, which works whatever it speaks:",
+			"",
+			"      health: tcp",
+			"",
+			"or ask the container itself, with health: {cmd: [...]}.")
+	}
+	return ""
 }
 
 func serviceByImage(sp *spec.Spec, image string) *spec.Service {

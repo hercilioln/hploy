@@ -161,3 +161,73 @@ func TestUnknownFieldIsAnError(t *testing.T) {
 		t.Error("a misspelled key should be an error, not a silent default")
 	}
 }
+
+// Resolving by directory is what makes a bare `hploy plan` work inside a
+// registered clone whose spec lives in the store, not in the repo.
+func TestFindByPath(t *testing.T) {
+	t.Setenv("HPLOY_HOME", t.TempDir())
+	clone := t.TempDir()
+	other := t.TempDir()
+
+	if err := SaveApp(&App{Name: "afficionado", Path: clone}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := FindByPath(clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Name != "afficionado" {
+		t.Fatalf("got %v, want the registered app", got)
+	}
+
+	// A relative path and a trailing slash name the same directory.
+	for _, variant := range []string{clone + "/", clone + "/."} {
+		got, err := FindByPath(variant)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got == nil {
+			t.Errorf("%q should resolve to the same app", variant)
+		}
+	}
+
+	none, err := FindByPath(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if none != nil {
+		t.Errorf("an unrelated directory should match nothing, got %q", none.Name)
+	}
+}
+
+// A subdirectory is deliberately not a match: `hploy down` run deep inside a
+// project must not tear the whole app down by surprise.
+func TestFindByPathDoesNotMatchSubdirectories(t *testing.T) {
+	t.Setenv("HPLOY_HOME", t.TempDir())
+	clone := t.TempDir()
+	if err := SaveApp(&App{Name: "demo", Path: clone}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := FindByPath(filepath.Join(clone, "src"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Errorf("a subdirectory matched %q", got.Name)
+	}
+}
+
+func TestNamesListsTheRegistry(t *testing.T) {
+	t.Setenv("HPLOY_HOME", t.TempDir())
+	for _, n := range []string{"beta", "alpha"} {
+		if err := SaveApp(&App{Name: n, Path: "/srv/" + n}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := Names()
+	if len(got) != 2 || got[0] != "alpha" || got[1] != "beta" {
+		t.Errorf("Names() = %v, want [alpha beta]", got)
+	}
+}

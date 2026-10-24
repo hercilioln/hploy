@@ -58,24 +58,31 @@ func LoadFile(path string) (map[string]string, error) {
 	return out, sc.Err()
 }
 
-// AppEnv is the env a spec resolves against: the application's file, plus
-// hploy's own store for keys the application does not carry.
-func AppEnv(specDir, envFile, app string) (map[string]string, error) {
-	merged, err := LoadFile(filepath.Join(specDir, envFile))
+// AppEnv returns both halves of the environment.
+//
+// lookup is what ${NAME} resolves against: the application's file plus hploy's
+// own store, for keys the application does not carry. fileEnv is only the
+// application's file, and is what env.from_file injects -- hploy's store may
+// hold its own secrets, which must not be handed to the app container.
+func AppEnv(specDir, envFile, app string) (lookup, fileEnv map[string]string, err error) {
+	fileEnv, err = LoadFile(filepath.Join(specDir, envFile))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	extra, err := LoadFile(HployEnvPath(app))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	lookup = make(map[string]string, len(fileEnv)+len(extra))
+	for k, v := range extra {
+		lookup[k] = v
 	}
 	// The application's file wins: it is the documented source of truth.
-	for k, v := range extra {
-		if _, taken := merged[k]; !taken {
-			merged[k] = v
-		}
+	for k, v := range fileEnv {
+		lookup[k] = v
 	}
-	return merged, nil
+	return lookup, fileEnv, nil
 }
 
 // unquote strips surrounding quotes. Nothing else is interpreted, so a value

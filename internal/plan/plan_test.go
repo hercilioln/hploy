@@ -2,8 +2,12 @@ package plan
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"net/url"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/hercilioln/hploy/internal/engine"
@@ -17,6 +21,7 @@ type fakeEngine struct {
 	networks   []engine.Network
 	volumes    []engine.Volume
 	images     map[string]string // reference -> current ID
+	logs       string            // what Logs hands back
 }
 
 func (f *fakeEngine) Ping(context.Context) (string, error) { return "fake", nil }
@@ -36,7 +41,7 @@ func (f *fakeEngine) Stats(context.Context, []string) (<-chan engine.Sample, <-c
 	return nil, nil
 }
 func (f *fakeEngine) Logs(context.Context, string, engine.LogOptions) (io.ReadCloser, error) {
-	return nil, nil
+	return io.NopCloser(strings.NewReader(f.logs)), nil
 }
 
 func load(t *testing.T) *spec.Spec {
@@ -54,6 +59,13 @@ func exampleEnv() map[string]string {
 
 func target(sp *spec.Spec, env map[string]string) *Target {
 	return &Target{Spec: sp, Env: env}
+}
+
+// hashOf is the label an already-converged container would carry. It goes
+// through the Target so the test cannot drift from what apply writes --
+// which is the whole reason the hash exists.
+func hashOf(sp *spec.Spec, env map[string]string, sv *spec.Service) string {
+	return target(sp, env).Hash(sv)
 }
 
 // present marks every image of a spec as already on the machine, which is the
@@ -118,7 +130,7 @@ func TestConvergedMachinePlansNothing(t *testing.T) {
 			App:      sp.App,
 			Service:  sv.Name(),
 			ImageID:  f.images[sv.Image],
-			SpecHash: sv.Hash(sp.App),
+			SpecHash: hashOf(sp, exampleEnv(), sv),
 			State:    "running",
 		})
 	}
@@ -146,7 +158,7 @@ func TestChangedConfigPlansRecreate(t *testing.T) {
 			ImageID: f.images[sp.Web.Image], SpecHash: "stale", State: "running"},
 		{Name: "example-db", App: "example", Service: "db",
 			ImageID:  f.images[sp.Services["db"].Image],
-			SpecHash: sp.Services["db"].Hash(sp.App), State: "running"},
+			SpecHash: hashOf(sp, env, sp.Services["db"]), State: "running"},
 	}
 
 	p, err := Build(context.Background(), f, target(sp, env))
@@ -180,7 +192,7 @@ func TestStoppedContainerPlansStart(t *testing.T) {
 			App:      sp.App,
 			Service:  sv.Name(),
 			ImageID:  f.images[sv.Image],
-			SpecHash: sv.Hash(sp.App),
+			SpecHash: hashOf(sp, exampleEnv(), sv),
 			State:    state,
 		})
 	}
@@ -319,7 +331,7 @@ func TestRebuiltImagePlansRecreate(t *testing.T) {
 			App:      sp.App,
 			Service:  sv.Name(),
 			ImageID:  id,
-			SpecHash: sv.Hash(sp.App),
+			SpecHash: hashOf(sp, exampleEnv(), sv),
 			State:    "running",
 		})
 	}
@@ -350,7 +362,7 @@ func TestAbsentImageDoesNotPlanRecreate(t *testing.T) {
 			App:      sp.App,
 			Service:  sv.Name(),
 			ImageID:  "sha256:whatever",
-			SpecHash: sv.Hash(sp.App),
+			SpecHash: hashOf(sp, exampleEnv(), sv),
 			State:    "running",
 		})
 	}
@@ -362,5 +374,78 @@ func TestAbsentImageDoesNotPlanRecreate(t *testing.T) {
 		if got := verbOf(p, name); got != Unchanged {
 			t.Errorf("%s = %q, want unchanged", name, got)
 		}
+	}
+}
+
+// The failure that started this: php-fpm answers on 9000 in FastCGI, the HTTP
+// probe never succeeds, and the container's own log says "ready to handle
+// connections". Without the reason, the error and the log contradict
+// each other and neither is wrong.
+func TestProbeHintExplainsANonHTTPPort(t *testing.T) {
+	sv := &spec.Service{Port: 9000, Health: &spec.Health{Path: "/"}}
+	err := fmt.Errorf(`GET / on port 9000: malformed HTTP response "\x01\x06\x00\x01"`)
+
+	hint := probeHint(err, sv)
+	if hint == "" {
+		t.Fatal("a port answering in something other than HTTP needs explaining")
+	}
+	if !strings.Contains(hint, "not in HTTP") {
+		t.Errorf("hint = %q", hint)
+	}
+	// It has to say what to do, not only what happened.
+	if !strings.Contains(hint, "cmd:") {
+		t.Errorf("the hint names no way out:\n%s", hint)
+	}
+}
+
+func TestProbeHintExplainsAClosedPort(t *testing.T) {
+	sv := &spec.Service{Port: 8080, Health: &spec.Health{Path: "/"}}
+	err := fmt.Errorf("GET / on port 8080: %w", syscall.ECONNREFUSED)
+
+	hint := probeHint(err, sv)
+	if !strings.Contains(hint, "nothing is listening on port 8080") {
+		t.Errorf("hint = %q", hint)
+	}
+}
+
+// Still booting is the common case and must stay quiet.
+func TestProbeHintSaysNothingAboutATimeout(t *testing.T) {
+	sv := &spec.Service{Port: 8080, Health: &spec.Health{Path: "/"}}
+	if hint := probeHint(fmt.Errorf("context deadline exceeded"), sv); hint != "" {
+		t.Errorf("hint = %q, want none", hint)
+	}
+}
+
+func TestUnwrapURLDropsTheRepeatedPrefix(t *testing.T) {
+	wrapped := &url.Error{Op: "Get", URL: "http://172.17.0.2:9000/", Err: syscall.ECONNREFUSED}
+
+	got := unwrapURL(wrapped)
+	if !errors.Is(got, syscall.ECONNREFUSED) {
+		t.Fatalf("got %v", got)
+	}
+	if strings.Contains(got.Error(), "http://") {
+		t.Errorf("the URL is already in the message: %q", got)
+	}
+}
+
+// A container that failed its healthcheck having logged nothing is exactly
+// when the tail matters, and strings.Split never returns an empty slice -- so
+// counting lines is the only way to know the log was silent.
+func TestContainerTailSaysSoWhenTheLogIsEmpty(t *testing.T) {
+	for _, logged := range []string{"", "\n", "   \n\n"} {
+		f := &fakeEngine{logs: logged}
+		got := containerTail(context.Background(), f, "demo-web")
+		if !strings.Contains(got, "printed nothing at all") {
+			t.Errorf("for %q got %q", logged, got)
+		}
+		if strings.Contains(got, "last lines of") {
+			t.Errorf("for %q it promised lines it does not have: %q", logged, got)
+		}
+	}
+
+	f := &fakeEngine{logs: "boot failed\n"}
+	got := containerTail(context.Background(), f, "demo-web")
+	if !strings.Contains(got, "last lines of demo-web") || !strings.Contains(got, "boot failed") {
+		t.Errorf("got %q", got)
 	}
 }

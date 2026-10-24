@@ -167,11 +167,42 @@ func (s *Spec) Validate() error {
 		}
 	}
 
+	for _, sv := range s.all() {
+		if m := sv.Resources.Memory; m != 0 && m < MinMemory {
+			fail("%s: resources.memory is %s, below the %s Docker accepts%s",
+				sv.Name(), m, MinMemory, didYouMean(m))
+		}
+	}
+
+	// tcp and path both probe the port, so there has to be one. A support
+	// service has no port by design, which leaves it cmd or nothing.
+	for _, sv := range s.all() {
+		if sv.Health == nil || sv.Port != 0 {
+			continue
+		}
+		switch {
+		case sv.Health.TCP:
+			fail("%s: health tcp needs a port to connect to", sv.Name())
+		case sv.Health.Path != "":
+			fail("%s: health %s needs a port to request it on", sv.Name(), sv.Health.Path)
+		}
+	}
+
 	if len(problems) > 0 {
 		sort.Strings(problems)
 		return fmt.Errorf("invalid spec:\n  - %s", strings.Join(problems, "\n  - "))
 	}
 	return nil
+}
+
+// didYouMean names the mistake behind almost every memory below the floor: a
+// bare number is bytes, so "256" is 256 bytes and not the 256 megabytes
+// whoever typed it had in mind.
+func didYouMean(m Bytes) string {
+	if m >= 1<<20 {
+		return ""
+	}
+	return fmt.Sprintf(" — a bare number is bytes, so did you mean %dm?", uint64(m))
 }
 
 // all returns web + services in a stable order.

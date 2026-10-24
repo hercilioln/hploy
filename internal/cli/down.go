@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/hercilioln/hploy/internal/engine"
 	"github.com/hercilioln/hploy/internal/plan"
 	"github.com/hercilioln/hploy/internal/spec"
+	"github.com/hercilioln/hploy/internal/store"
 	"github.com/hercilioln/hploy/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -83,7 +85,7 @@ func cmdDown() *cobra.Command {
 				fmt.Println(ui.Bad.Render("this deletes data and cannot be undone"))
 			}
 			if !assumeYes {
-				ok, err := confirmWith("remove these? [y/N] ")
+				ok, err := confirmWith("remove these?")
 				if err != nil {
 					return err
 				}
@@ -94,9 +96,9 @@ func cmdDown() *cobra.Command {
 			}
 			fmt.Println()
 
-			step := stepPrinter()
+			step, _ := output(ui.NewConsole(os.Stdout), false)
 			for _, c := range containers {
-				step(plan.Remove, plan.KindContainer, c.Name, "")
+				step.Step(plan.Remove, plan.KindContainer, c.Name, "")
 				if c.State == "running" {
 					if err := eng.Stop(cmd.Context(), c.Name, 10*time.Second); err != nil {
 						return err
@@ -107,14 +109,14 @@ func cmdDown() *cobra.Command {
 				}
 			}
 			if network != "" {
-				step(plan.Remove, plan.KindNetwork, network, "")
+				step.Step(plan.Remove, plan.KindNetwork, network, "")
 				if err := eng.RemoveNetwork(cmd.Context(), network); err != nil {
 					return err
 				}
 			}
 			if withVolumes {
 				for _, v := range volumes {
-					step(plan.Remove, plan.KindVolume, v, "")
+					step.Step(plan.Remove, plan.KindVolume, v, "")
 					if err := eng.RemoveVolume(cmd.Context(), v); err != nil {
 						return err
 					}
@@ -130,7 +132,9 @@ func cmdDown() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&file, "file", "f", defaultSpecFile, "path to the spec")
-	cmd.Flags().BoolVarP(&withVolumes, "volumes", "v", false, "also delete the volumes and their data")
+	// No shorthand on purpose: -v means --verbose on apply and build, and
+	// reaching for it here out of habit would delete data irreversibly.
+	cmd.Flags().BoolVar(&withVolumes, "volumes", false, "also delete the volumes and their data")
 	cmd.Flags().BoolVarP(&assumeYes, "yes", "y", false, "skip the confirmation")
 	return cmd
 }
@@ -192,15 +196,28 @@ func cmdStop() *cobra.Command {
 	return cmd
 }
 
-// appName takes the app from the argument, or from the spec in the current
-// directory. Tearing down must not require a readable spec: the argument form
-// still works after the file is gone.
+// appName takes the app from the argument, from the registry entry for this
+// directory, or from a spec sitting here.
+//
+// The argument form never reads a spec at all, so an app can still be torn
+// down after its directory or its spec is gone.
 func appName(args []string, file string) (string, error) {
 	if len(args) > 0 {
 		return args[0], nil
 	}
+
+	if file == defaultSpecFile {
+		app, err := store.FindByPath(filepath.Dir(file))
+		if err != nil {
+			return "", err
+		}
+		if app != nil {
+			return app.Name, nil
+		}
+	}
+
 	if _, err := os.Stat(file); err != nil {
-		return "", fmt.Errorf("no spec here and no app named — try `hploy down <app>` (see `hploy apps`)")
+		return "", noAppHere(file)
 	}
 	sp, err := spec.Load(file)
 	if err != nil {

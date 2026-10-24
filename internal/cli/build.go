@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/hercilioln/hploy/internal/engine"
 	"github.com/hercilioln/hploy/internal/plan"
@@ -12,7 +13,7 @@ import (
 
 func cmdBuild() *cobra.Command {
 	var file, only string
-	var noCache, pull, quiet bool
+	var noCache, pull, verbose bool
 
 	cmd := &cobra.Command{
 		Use:   "build [app]",
@@ -49,11 +50,12 @@ func cmdBuild() *cobra.Command {
 			fmt.Println(ui.Title.Render("app " + t.Spec.App))
 			fmt.Println()
 
-			out := plan.Output{Step: stepPrinter(), Logs: buildLogWriter(quiet)}
+			out, logs := output(ui.NewConsole(os.Stdout), verbose)
 			for _, sv := range todo {
 				err := plan.BuildService(cmd.Context(), eng, t, sv,
 					engine.BuildOptions{NoCache: noCache, Pull: pull}, out)
 				if err != nil {
+					logs.dump()
 					return fmt.Errorf("%s: %w", sv.Name(), err)
 				}
 			}
@@ -67,6 +69,6 @@ func cmdBuild() *cobra.Command {
 	cmd.Flags().StringVar(&only, "service", "", "build only this service")
 	cmd.Flags().BoolVar(&noCache, "no-cache", false, "ignore the layer cache")
 	cmd.Flags().BoolVar(&pull, "pull", false, "refresh the base image")
-	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "hide the build output")
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show the full build output")
 	return cmd
 }
